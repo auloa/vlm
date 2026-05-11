@@ -68,6 +68,8 @@ class RLConfig:
     max_steps: int = 1500
     early_stop_patience: int = 300
     early_stop_min_delta: float = 0.001
+    ppo_epochs: int = 1
+    clip_eps: float = 0.2
 
 
 @dataclass

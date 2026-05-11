@@ -235,6 +235,12 @@ def _load_model_with_projector(
         image_height=cfg.vision.image_height,
         image_width=cfg.vision.image_width,
         lm_name=cfg.model.lm_name,
+        cross_attention_projector=cfg.projector.cross_attention,
+        cross_attention_projector_num_queries=cfg.projector.num_queries,
+        cross_attention_projector_num_heads=cfg.projector.num_heads,
+        cross_attention_projector_num_layers=cfg.projector.num_layers,
+        cross_attention_projector_ffn_mult=cfg.projector.ffn_mult,
+        projector_mult=cfg.projector.projector_mult,
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -242,6 +248,7 @@ def _load_model_with_projector(
 
     set_projector_only_trainable(model)
     model.eval()
+    print("All modules in the model in evaluation mode.")
 
     return model
 

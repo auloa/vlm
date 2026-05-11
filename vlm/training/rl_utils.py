@@ -180,28 +180,30 @@ def compute_completion_token_log_probs(
     return token_log_probs, target_mask
 
 
-def compute_pg_kl_loss(
+def compute_grpo_loss(
     policy_token_log_probs: torch.Tensor,
+    old_token_log_probs: torch.Tensor,
     ref_token_log_probs: torch.Tensor,
     token_mask: torch.Tensor,
     advantages: torch.Tensor,
     beta: float,
+    clip_eps: float = 0.2,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """REINFORCE with group-relative advantages and per-token KL regularization.
+    """GRPO loss: clipped policy gradient with group-relative advantages and KL regularization.
 
-    Policy term: standard policy gradient. For each completion we compute the
-    masked mean of per-token log-probs, weight by the group-relative advantage,
-    and average across the group. No PPO clipping — with a single gradient step
-    per generated batch the clipped ratio is always 1 and has no effect.
+    Policy term: PPO clipped surrogate. The ratio π_new / π_old is clipped to
+    [1 - clip_eps, 1 + clip_eps], where π_old is the policy that generated the
+    completions (snapshotted before any gradient step this batch). With
+    ppo_epochs=1 the ratio is always 1 on the first step and clipping has no
+    effect — it only bites on subsequent inner-loop steps.
 
-    KL term: Schulman k3 estimator (exp(r) - r - 1) applied per token, then
-    masked-averaged. Using k3 on per-token log-ratios and then averaging gives
-    the true KL; applying k3 to sequence-mean log-ratios understates it because
-    k3 is convex.
+    KL term: Schulman k3 estimator (exp(r) - r - 1) per token, masked-averaged,
+    where r = log π_ref - log π_new. Computed per token rather than on sequence
+    means because k3 is convex.
 
     Returns:
         loss:        total loss (policy + beta * kl)
-        policy_loss: policy gradient term
+        policy_loss: clipped policy gradient term
         kl_loss:     KL regularization term
     """
     advantages = advantages.detach()
@@ -209,14 +211,20 @@ def compute_pg_kl_loss(
     token_counts = token_mask.sum(dim=1).clamp_min(1.0)
     total_tokens = token_mask.sum().clamp_min(1.0)
 
-    policy_seq_log_probs = (
-        policy_token_log_probs * token_mask
-    ).sum(dim=1) / token_counts
+    # Clipped policy gradient.
+    log_ratio_old = policy_token_log_probs - old_token_log_probs.detach()
+    ratio = torch.exp(log_ratio_old)
+    clipped_ratio = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
 
-    policy_loss = -(advantages * policy_seq_log_probs).mean()
+    adv = advantages.unsqueeze(-1)  # (K,) -> (K, 1) for broadcast over tokens
+    per_token_obj = torch.min(ratio * adv, clipped_ratio * adv)
 
-    log_ratio = ref_token_log_probs - policy_token_log_probs
-    kl_per_token = torch.exp(log_ratio) - log_ratio - 1.0
+    policy_seq = (per_token_obj * token_mask).sum(dim=1) / token_counts
+    policy_loss = -policy_seq.mean()
+
+    # KL loss: per-token k3, masked mean.
+    log_ratio_ref = ref_token_log_probs - policy_token_log_probs
+    kl_per_token = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
     kl_loss = (kl_per_token * token_mask).sum() / total_tokens
 
     loss = policy_loss + beta * kl_loss

@@ -91,6 +91,8 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     cfg.rl.max_steps = 500
     cfg.rl.early_stop_patience = 300
     cfg.rl.early_stop_min_delta = 0.001
+    cfg.rl.ppo_epochs = 1
+    cfg.rl.clip_eps = 0.2
 
     # Evaluation
     cfg.eval.num_samples = 50
@@ -131,17 +133,28 @@ def tlama_sp(name: str) -> TrainingConfig:
     return cfg
 
 @register_config
-def tlama_sp_skl(name: str) -> TrainingConfig:
+def tlama_sp_n_accum(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
-    cfg.rl.kl_coef = 0.07
+    cfg.sft.grad_accum_steps = 1
     return cfg
 
 @register_config
-def tlama_sp_nr(name: str) -> TrainingConfig:
+def tlama_sp_n_accum_tight(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
-    cfg.rl.kl_coef = 0.06
-    cfg.model.instruction = "Extract the tabular data from this document and output it in JSON format. Copy item names, prices, and totals exactly as they appear in the image — do not paraphrase or substitute."
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.07
     return cfg
+
+
+@register_config
+def tlama_ca(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.projector.cross_attention = True
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.07
+    return cfg
+
+
 
 
 
