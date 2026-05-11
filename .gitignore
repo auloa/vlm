@@ -1,0 +1,45 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# uv
+.venv/
+
+# pycharm
+.idea/
+
+# env
+.env
+
+# model weights & checkpoints (too large for git)
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# huggingface cache
+.cache/
+
+# data
+data/raw/
+data/processed/
+
+# training outputs
+outputs/
+logs/
+runs/
+
+# wandb
+wandb/
+
+# jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# macos
+.DS_Store
+/exploration/
+/.venv/
