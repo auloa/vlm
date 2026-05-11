@@ -19,7 +19,7 @@ from vlm.training.rewards import RewardBreakdown, compute_reward
 from vlm.training.rl_utils import (
     clone_reference_projector,
     compute_completion_token_log_probs,
-    compute_pg_kl_loss,
+    compute_grpo_loss,
 )
 from vlm.utils.device import get_device
 from vlm.utils.training import get_autocast, set_seed
@@ -218,9 +218,9 @@ def train_rl(cfg: TrainingConfig) -> None:
                         require_grad=False,
                     )
 
-                # 5. Score completions under current projector with gradients.
-                with get_autocast(device):
-                    policy_token_log_probs, token_mask = compute_completion_token_log_probs(
+                # 5. Snapshot old policy log-probs before any gradient step.
+                with torch.no_grad():
+                    old_token_log_probs, _ = compute_completion_token_log_probs(
                         model=model,
                         image=image,
                         completions=gen.texts,
@@ -228,37 +228,57 @@ def train_rl(cfg: TrainingConfig) -> None:
                         instruction=instruction,
                         projector=model.projector,
                         max_completion_length=rl.max_completion_tokens,
-                        require_grad=True,
+                        require_grad=False,
                     )
 
-                    loss, policy_loss, kl_loss = compute_pg_kl_loss(
-                        policy_token_log_probs=policy_token_log_probs,
-                        ref_token_log_probs=ref_token_log_probs,
-                        token_mask=token_mask,
-                        advantages=advantages,
-                        beta=rl.kl_coef,
-                    )
+                # 6. PPO inner loop.
+                valid_step = True
+                for _ppo_step in range(rl.ppo_epochs):
+                    with get_autocast(device):
+                        policy_token_log_probs, token_mask = compute_completion_token_log_probs(
+                            model=model,
+                            image=image,
+                            completions=gen.texts,
+                            tokenizer=tokenizer,
+                            instruction=instruction,
+                            projector=model.projector,
+                            max_completion_length=rl.max_completion_tokens,
+                            require_grad=True,
+                        )
 
-                # 6. Projector-only optimization step.
-                if not torch.isfinite(loss) or loss.abs() > 100:
-                    print(
-                        f"warning: invalid RL loss at step {global_step}; "
-                        f"loss={loss.item() if torch.isfinite(loss) else loss}"
-                    )
+                        loss, policy_loss, kl_loss = compute_grpo_loss(
+                            policy_token_log_probs=policy_token_log_probs,
+                            old_token_log_probs=old_token_log_probs,
+                            ref_token_log_probs=ref_token_log_probs,
+                            token_mask=token_mask,
+                            advantages=advantages,
+                            beta=rl.kl_coef,
+                            clip_eps=rl.clip_eps,
+                        )
+
+                    if not torch.isfinite(loss) or loss.abs() > 100:
+                        print(
+                            f"warning: invalid RL loss at step {global_step}; "
+                            f"loss={loss.item() if torch.isfinite(loss) else loss}"
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        valid_step = False
+                        break
+
                     optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-                    continue
+                    loss.backward()
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.projector.parameters(),
+                        max_norm=rl.grad_clip_norm,
+                    )
 
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.projector.parameters(),
-                    max_norm=rl.grad_clip_norm,
-                )
+                    optimizer.step()
 
-                optimizer.step()
                 global_step += 1
+
+                if not valid_step:
+                    continue
 
                 ema_reward, best_ema_reward, best_ema_for_stopping, steps_since_improvement, stop_training = _step_bookkeeping(
                     model=model, optimizer=optimizer, writer=writer, cfg=cfg, rl=rl,

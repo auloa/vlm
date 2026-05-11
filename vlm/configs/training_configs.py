@@ -91,6 +91,8 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     cfg.rl.max_steps = 500
     cfg.rl.early_stop_patience = 300
     cfg.rl.early_stop_min_delta = 0.001
+    cfg.rl.ppo_epochs = 1
+    cfg.rl.clip_eps = 0.2
 
     # Evaluation
     cfg.eval.num_samples = 50
