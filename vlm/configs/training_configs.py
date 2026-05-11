@@ -66,26 +66,26 @@ def _base_receipt_config(name: str) -> TrainingConfig:
 
     # Supervised fine-tuning
     cfg.sft.epochs = 15
-    cfg.sft.batch_size = 4
+    cfg.sft.batch_size = 8
     cfg.sft.learning_rate = 5e-5
     cfg.sft.weight_decay = 0.01
     cfg.sft.grad_accum_steps = 4
     cfg.sft.grad_clip_norm = 0.5
     cfg.sft.max_target_length = 192
     cfg.sft.log_every = 10
-    cfg.sft.sample_every = 50
+    cfg.sft.sample_every = 40
 
     # Reinforcement learning / alignment
     cfg.rl.epochs = 1
-    cfg.rl.completions_per_image = 4
+    cfg.rl.completions_per_image = 8
     cfg.rl.learning_rate = 5e-6
     cfg.rl.weight_decay = 0.01
     cfg.rl.temperature = 0.7
     cfg.rl.max_completion_tokens = 192
     cfg.rl.grad_clip_norm = 0.5
     cfg.rl.kl_coef = 0.02
-    cfg.rl.log_every = 5
-    cfg.rl.sample_every = 50
+    cfg.rl.log_every = 10
+    cfg.rl.sample_every = 40
     cfg.rl.ema_alpha = 0.05
     cfg.rl.save_every_n_steps = 200
     cfg.rl.max_steps = 500
@@ -125,28 +125,24 @@ def debug(name: str) -> TrainingConfig:
 
     return cfg
 
-
-@register_config
-def tlama_ca(name: str) -> TrainingConfig:
-    cfg = _base_receipt_config(name)
-    cfg.projector.cross_attention = True
-    cfg.rl.kl_coef = 0.05
-    cfg.rl.completions_per_image = 4
-    return cfg
-
 @register_config
 def tlama_sp(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
-    cfg.rl.kl_coef = 0.05
-    cfg.rl.completions_per_image = 4
     return cfg
 
+@register_config
+def tlama_sp_skl(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.rl.kl_coef = 0.07
+    return cfg
+
+@register_config
 def tlama_sp_nr(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
     cfg.rl.kl_coef = 0.06
-    cfg.rl.completions_per_image = 4
-    # cfg.model.instruction = "Extract the tabular data from this document and output it in JSON format. Copy item names, prices, and totals exactly as they appear in the image — do not paraphrase or substitute."
+    cfg.model.instruction = "Extract the tabular data from this document and output it in JSON format. Copy item names, prices, and totals exactly as they appear in the image — do not paraphrase or substitute."
     return cfg
+
 
 
 def get_training_config(name: str) -> TrainingConfig:
