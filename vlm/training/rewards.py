@@ -6,10 +6,14 @@ total (dict), void_menu (rare). The model never sees a fixed key set — it
 learns to extract whatever fields the ground truth contains for that receipt.
 
 Reward components (final score clipped to [0, 1]):
-    format         0-0.30   strict JSON parseable, no wrapping prose
-    schema         0-0.30   correct structural shape (menu list, total dict)
-    content        0-0.40   dynamic per-key grading against ground truth
+    format         -0.20–0  penalty-only: 0 for correct, negative for broken
+    schema         -0.15–0  penalty-only: 0 for correct, negative for broken
+    content        0–0.70   dynamic per-key grading against ground truth
     hallucination  ≤ 0      extra keys, duplicate items, leaked tokens, garbage
+
+Format and schema are solved by SFT — rewarding them adds no gradient signal
+since all K rollouts score identically. Penalty-only maintains format without
+wasting reward budget on a saturated component. Content gets the full budget.
 
 Content grading walks the GT recursively. For each leaf key, the model is
 scored by:
@@ -227,6 +231,12 @@ def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
     """Negative score for invented keys, duplicate items, garbage text,
     and text field values with low token overlap against GT.
 
+    Structural hallucination penalties distinguish misplaced from invented:
+        - Truly extra leaf keys (invented key name or wrong value): -0.02 each, cap -0.20
+        - Misplaced leaf keys (right key+value, wrong section): -0.01 each, cap -0.05
+        - Truly fabricated sections (content doesn't match GT keys): -0.05 per section
+        - Misplaced sections (content mostly matches GT keys): -0.02 per section
+
     Text hallucination penalty:
         For each leaf key present in both pred and GT where the GT value
         is text (not numeric), apply:
@@ -240,9 +250,47 @@ def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
     pred_leaves = _flatten_leaves(parsed) if isinstance(parsed, dict) else {}
 
     # Extra keys in pred that aren't in GT — model invented them.
+    # Distinguish truly invented keys from misplaced ones (right key/value, wrong section).
     extra = set(pred_leaves) - set(gt_leaves)
     if extra:
-        penalty -= min(0.20, 0.02 * len(extra))
+        gt_key_values: dict[str, str] = {}
+        for path, val in gt_leaves.items():
+            key_name = path.split(".")[-1]
+            gt_key_values[key_name] = val
+
+        truly_extra = []
+        misplaced = []
+        for path in extra:
+            key_name = path.split(".")[-1]
+            pred_val = pred_leaves[path]
+            if key_name in gt_key_values:
+                match = _value_match(pred_val, gt_key_values[key_name])
+                if match > 0.5:
+                    misplaced.append(path)
+                else:
+                    truly_extra.append(path)
+            else:
+                truly_extra.append(path)
+
+        if truly_extra:
+            penalty -= min(0.20, 0.02 * len(truly_extra))
+        if misplaced:
+            penalty -= min(0.05, 0.01 * len(misplaced))
+
+    # Fabricated top-level sections — penalise less if content is mostly correct.
+    gt_top = set(gt.keys()) if isinstance(gt, dict) else set()
+    pred_top = set(parsed.keys()) if isinstance(parsed, dict) else set()
+    extra_sections = pred_top - gt_top
+    if extra_sections:
+        gt_key_names = {p.split(".")[-1] for p in gt_leaves}
+        for section in extra_sections:
+            pred_section = parsed.get(section, {})
+            section_leaves = _flatten_leaves(pred_section) if isinstance(pred_section, dict) else {}
+            section_key_names = {p.split(".")[-1] for p in section_leaves}
+            if section_key_names and len(section_key_names & gt_key_names) / len(section_key_names) > 0.5:
+                penalty -= 0.02  # misplaced section — content mostly from GT
+            else:
+                penalty -= 0.05  # truly fabricated section
 
     # Text field hallucination: fields in both pred and GT where GT is text.
     MAX_TEXT_PENALTY = 0.03   # per field

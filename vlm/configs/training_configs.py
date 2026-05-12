@@ -143,7 +143,7 @@ def base(name: str) -> TrainingConfig:
 
 
 @register_config
-def b4_e25(name: str) -> TrainingConfig:
+def b4_e17_nodrop(name: str) -> TrainingConfig:
     """
     More SFT epochs (17) with dropout.
     """
@@ -151,6 +151,21 @@ def b4_e25(name: str) -> TrainingConfig:
     cfg.sft.batch_size = 4
     cfg.sft.epochs = 17
     cfg.sft.grad_accum_steps = 1
+    cfg.projector.dropout = None
+    cfg.rl.kl_coef = 0.2
+
+    return cfg
+
+@register_config
+def b4_e17_drop05(name: str) -> TrainingConfig:
+    """
+    More SFT epochs (17) with dropout.
+    """
+    cfg = _base_receipt_config(name)
+    cfg.sft.batch_size = 4
+    cfg.sft.epochs = 17
+    cfg.sft.grad_accum_steps = 1
+    cfg.projector.dropout = 0.05
     return cfg
 
 @register_config
@@ -165,35 +180,6 @@ def b4_e25_tight(name: str) -> TrainingConfig:
     cfg.rl.kl_coef = 0.2
     return cfg
 
-@register_config
-def b4_e25_tight_192(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (27) with dropout with tight kl constraint.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 25
-    cfg.sft.grad_accum_steps = 1
-    cfg.rl.kl_coef = 0.2
-    cfg.model.max_target_length = 192
-    cfg.rl.max_target_length = 192
-    cfg.eval.max_completion_tokens = 192
-
-    return cfg
-
-@register_config
-def ca_b4_e20(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (20) with dropout and cross-attention.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.projector.cross_attention = True
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 20
-    cfg.sft.learning_rate = 1e-5
-    cfg.sft.learning_rate = 1e-5
-    cfg.sft.grad_accum_steps = 1
-    return cfg
 
 
 def get_training_config(name: str) -> TrainingConfig:
