@@ -143,75 +143,28 @@ def base(name: str) -> TrainingConfig:
 
 
 @register_config
-def nodrop(name: str) -> TrainingConfig:
-    """Ablation: no projector dropout.
-
-    Faster convergence but overfits from epoch 9. Shows that dropout
-    stabilises the val curve at the cost of slower learning.
+def b4_e25(name: str) -> TrainingConfig:
     """
-    cfg = _base_receipt_config(name)
-    cfg.projector.dropout = None
-    return cfg
-
-@register_config
-def no_g_accum(name: str) -> TrainingConfig:
-    """Ablation: no gradient accumulation (batch size 4).
-
-    More optimizer steps per epoch, which stabilises training with this data
-    size. Val loss converges faster and to a lower value than with grad
-    accumulation.
+    More SFT epochs (17) with dropout.
     """
     cfg = _base_receipt_config(name)
     cfg.sft.batch_size = 4
+    cfg.sft.epochs = 17
     cfg.sft.grad_accum_steps = 1
     return cfg
 
 @register_config
-def no_g_accum_ndrop(name: str) -> TrainingConfig:
-    """ no gradient accumulation (batch size 4).
+def b4_e25_tight(name: str) -> TrainingConfig:
+    """
+    More SFT epochs (17) with dropout with tight kl constraint.
     """
     cfg = _base_receipt_config(name)
     cfg.sft.batch_size = 4
+    cfg.sft.epochs = 17
     cfg.sft.grad_accum_steps = 1
-    cfg.projector.dropout = None
+    cfg.rl.kl_coef = 0.2
     return cfg
 
-@register_config
-def no_g_accum_long(name: str) -> TrainingConfig:
-    """More SFT epochs (25) with dropout.
-
-    The CORD-native schema has not converged at 15 epochs with dropout —
-    val loss is still declining. This config gives the model more time.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 25
-    cfg.sft.grad_accum_steps = 1
-    return cfg
-
-
-@register_config
-def no_g_accum_long_rep(name: str) -> TrainingConfig:
-    """More SFT epochs (25) with dropout.
-
-    The CORD-native schema has not converged at 15 epochs with dropout —
-    val loss is still declining. This config gives the model more time.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 25
-    cfg.sft.grad_accum_steps = 1
-    return cfg
-
-
-@register_config
-def ca(name: str) -> TrainingConfig:
-    """Cross-attention resampler projector with dropout.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.projector.cross_attention = True
-    cfg.projector.dropout = 0.15
-    return cfg
 
 
 def get_training_config(name: str) -> TrainingConfig:
