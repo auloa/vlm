@@ -100,19 +100,20 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 
 **Key config fields:**
 
-| Section | Field | Default | What it controls |
-|---|---|---|---|
-| `sft` | `epochs` | 15 | Number of SFT training epochs |
-| `sft` | `batch_size` | 4 | Effective batch size (no accumulation) |
-| `sft` | `learning_rate` | 5e-5 | AdamW LR for SFT |
-| `sft` | `max_target_length` | 256 | Max target tokens; longer samples are dropped |
-| `rl` | `completions_per_image` | 4 | K for group-relative advantages (must be ≥ 2) |
-| `rl` | `learning_rate` | 5e-6 | AdamW LR for RL |
-| `rl` | `kl_coef` | 0.02 | KL penalty weight against SFT reference |
-| `rl` | `temperature` | 0.7 | Sampling temperature for RL rollouts |
-| `vision` | `image_height/width` | 640×960 | Resize target for Donut processor |
-| `projector` | `cross_attention` | False | Use resampler instead of MLP |
-| `eval` | `num_samples` | 50 | Test samples for evaluation |
+| Section | Field                       | Default  | What it controls                                                                             |
+|-------|-----------------------------|----------|----------------------------------------------------------------------------------------------|
+| `sft` | `epochs`                    | 15       | Number of SFT training epochs                                                                |
+| `sft` | `batch_size`                | 4        | Effective batch size (no accumulation)                                                       |
+| `sft` | `grad_accum_steps`          | 1        | Steps to accumulate before optimizing (effective batch size = batch_size × grad_accum_steps) |
+| `sft` | `learning_rate`             | 5e-5     | AdamW LR for SFT                                                                             |
+| `sft` | `max_target_length`         | 256      | Max target tokens; longer samples are dropped                                                |
+| `rl`  | `completions_per_image`     | 4        | K for group-relative advantages (must be ≥ 2)                                                |
+| `rl`  | `learning_rate`             | 5e-6     | AdamW LR for RL                                                                              |
+| `rl`  | `kl_coef`                   | 0.02     | KL penalty weight against SFT reference                                                      |
+| `rl`  | `temperature`               | 0.7      | Sampling temperature for RL rollouts                                                         |
+| `vision` | `image_height, image_width` | 640, 960 | Resize target for Donut processor                                                            |
+| `projector` | `cross_attention`           | False    | To use cross attention sampler instead of MLP                                                |
+| `eval` | `num_samples`               | 50       | Test samples for evaluation                                                                  |
 
 The `dataclass` definitions for each section are in `vlm/configs/training_schema.py`.
 
