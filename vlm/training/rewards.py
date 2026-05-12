@@ -236,14 +236,50 @@ def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
     """
     penalty = 0.0
 
-    # Extra keys in pred that aren't in GT — model invented them.
     gt_leaves = _flatten_leaves(gt) if isinstance(gt, dict) else {}
     pred_leaves = _flatten_leaves(parsed) if isinstance(parsed, dict) else {}
 
+    # Extra keys in pred that aren't in GT — model invented them.
     extra = set(pred_leaves) - set(gt_leaves)
     if extra:
-        # cap at -0.20; scale gently — 1 extra key = -0.02, 10+ = -0.20
         penalty -= min(0.20, 0.02 * len(extra))
+
+    # Text field hallucination: fields in both pred and GT where GT is text.
+    MAX_TEXT_PENALTY = 0.03   # per field
+    TEXT_PENALTY_CAP = 0.15   # total cap
+    text_penalty = 0.0
+
+    for path, gt_val in gt_leaves.items():
+        if path not in pred_leaves:
+            continue
+
+        gt_str = str(gt_val).strip()
+        pred_str = str(pred_leaves[path]).strip()
+
+        if not gt_str:
+            continue
+
+        # Skip numeric fields — those are handled by content score.
+        gt_digits = _digits_only(gt_str)
+        digit_density = len(gt_digits) / max(len(gt_str), 1)
+        if digit_density >= 0.50:
+            continue
+
+        # Skip very short GT values — single char / abbreviations too noisy.
+        if len(gt_str) < 3:
+            continue
+
+        gt_tokens = set(re.findall(r"\b\w+\b", gt_str.lower()))
+        pred_tokens = set(re.findall(r"\b\w+\b", pred_str.lower()))
+
+        if not gt_tokens:
+            continue
+
+        overlap = len(gt_tokens & pred_tokens) / len(gt_tokens)
+        field_penalty = -MAX_TEXT_PENALTY * (1.0 - overlap)
+        text_penalty += field_penalty
+
+    penalty += max(-TEXT_PENALTY_CAP, text_penalty)
 
     # Duplicate menu items (same name).
     if isinstance(parsed, dict):
