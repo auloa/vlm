@@ -156,15 +156,26 @@ def b4_e25(name: str) -> TrainingConfig:
 @register_config
 def b4_e25_tight(name: str) -> TrainingConfig:
     """
-    More SFT epochs (17) with dropout with tight kl constraint.
+    More SFT epochs (27) with dropout with tight kl constraint.
     """
     cfg = _base_receipt_config(name)
     cfg.sft.batch_size = 4
-    cfg.sft.epochs = 17
+    cfg.sft.epochs = 25
     cfg.sft.grad_accum_steps = 1
     cfg.rl.kl_coef = 0.2
     return cfg
 
+@register_config
+def ca_b4_e20(name: str) -> TrainingConfig:
+    """
+    More SFT epochs (20) with dropout and cross-attention.
+    """
+    cfg = _base_receipt_config(name)
+    cfg.projector.cross_attention = True
+    cfg.sft.batch_size = 4
+    cfg.sft.epochs = 20
+    cfg.sft.grad_accum_steps = 1
+    return cfg
 
 
 def get_training_config(name: str) -> TrainingConfig:
