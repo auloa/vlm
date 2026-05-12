@@ -24,7 +24,7 @@ class ReceiptVLM(nn.Module):
         cross_attention_projector_num_layers: int = 2,
         cross_attention_projector_ffn_mult: int = 4,
         projector_dropout:float|None=None,
-        projector_mult: int = 4,
+        projector_mult: int = 2,
         freeze_vision: bool = True,
         freeze_lm: bool = True,
     ):
