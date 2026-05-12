@@ -24,6 +24,12 @@ from vlm.utils.json_extractor import extract_json_object
 from vlm.utils.training import set_seed
 
 
+# Format adherence in this schema means:
+#   - parseable strict JSON
+#   - has top-level `menu` (list, non-empty) — the "line_items" of the assignment
+#   - has top-level `total` (dict) with `total_price` set
+# This is the direct translation of the assignment's "line_items, total" check
+# into CORD's native nomenclature.
 REQUIRED_TOP_KEYS = {"menu", "total"}
 
 
@@ -39,6 +45,7 @@ class SampleEval:
     menu_is_list: bool
     total_present: bool
     format_adherent: bool
+    full_structure_adherent: bool  # all GT top-level keys + all GT per-item keys present
     reward: float
     total_match: bool
     # Dynamic grading.
@@ -58,6 +65,7 @@ class EvalSummary:
     menu_list_rate: float
     total_present_rate: float
     format_adherence_rate: float
+    full_structure_rate: float     # all GT top-level + per-item keys present
     total_match_rate: float
     mean_reward: float
     mean_key_coverage: float
@@ -108,6 +116,10 @@ def evaluate_checkpoint(
 
     tokenizer = prepare_tokenizer(model.lm.tokenizer)
 
+    # Wrap with chat template — same as SFT/RL training.
+    # cfg.model.instruction is the raw text; build_instruction applies
+    # apply_chat_template so eval sees the same prompt distribution the
+    # model was trained on.
     instruction = build_instruction(tokenizer, cfg.model.instruction)
 
     dataset = CORDDataset(
@@ -321,6 +333,10 @@ def score_prediction(
         and total_present
     )
 
+    full_structure_adherent = format_adherent and _full_structure_adherent(
+        parsed_for_schema, ground_truth
+    )
+
     reward = compute_reward(prediction, ground_truth)
     total_match = _total_matches(parsed_for_schema, ground_truth)
 
@@ -337,6 +353,7 @@ def score_prediction(
         menu_is_list=menu_is_list,
         total_present=total_present,
         format_adherent=format_adherent,
+        full_structure_adherent=full_structure_adherent,
         reward=reward.total,
         total_match=total_match,
         key_coverage=coverage,
@@ -391,6 +408,7 @@ def summarize_samples(
         menu_list_rate=sum(s.menu_is_list for s in samples) / n,
         total_present_rate=sum(s.total_present for s in samples) / n,
         format_adherence_rate=sum(s.format_adherent for s in samples) / n,
+        full_structure_rate=sum(s.full_structure_adherent for s in samples) / n,
         total_match_rate=sum(s.total_match for s in samples) / n,
         mean_reward=mean([s.reward for s in samples]) if samples else 0.0,
         mean_key_coverage=mean([s.key_coverage for s in samples]) if samples else 0.0,
@@ -410,11 +428,59 @@ def print_summary(summary: EvalSummary) -> None:
     print(f"menu list rate:         {summary.menu_list_rate:.1%}")
     print(f"total present rate:     {summary.total_present_rate:.1%}")
     print(f"FORMAT ADHERENCE RATE:  {summary.format_adherence_rate:.1%}")
+    print(f"full structure rate:    {summary.full_structure_rate:.1%}")
     print(f"total match rate:       {summary.total_match_rate:.1%}")
     print(f"mean key coverage:      {summary.mean_key_coverage:.1%}")
     print(f"mean value accuracy:    {summary.mean_value_accuracy:.1%}")
     print(f"mean extra keys:        {summary.mean_extra_keys:.2f}")
     print(f"mean reward:            {summary.mean_reward:.3f}")
+
+
+def _full_structure_adherent(parsed, ground_truth: str) -> bool:
+    """Check that pred contains all GT top-level keys AND all GT per-item keys.
+
+    Top-level: every key in GT (menu, total, sub_total, void_menu) must be
+    present in pred.
+
+    Per-item: every key that appears in any GT menu item must appear in at
+    least one pred menu item.
+    """
+    if not isinstance(parsed, dict):
+        return False
+
+    try:
+        gt = json.loads(ground_truth)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    if not isinstance(gt, dict):
+        return False
+
+    # All GT top-level keys present in pred.
+    for key in gt:
+        if key not in parsed:
+            return False
+
+    # All GT per-item keys present in at least one pred item.
+    gt_menu = gt.get("menu")
+    pred_menu = parsed.get("menu")
+
+    if isinstance(gt_menu, list) and gt_menu:
+        gt_item_keys: set[str] = set()
+        for item in gt_menu:
+            if isinstance(item, dict):
+                gt_item_keys.update(item.keys())
+
+        if gt_item_keys and isinstance(pred_menu, list) and pred_menu:
+            pred_item_keys: set[str] = set()
+            for item in pred_menu:
+                if isinstance(item, dict):
+                    pred_item_keys.update(item.keys())
+
+            if not gt_item_keys.issubset(pred_item_keys):
+                return False
+
+    return True
 
 
 def _loads_exact_json(text: str | None):

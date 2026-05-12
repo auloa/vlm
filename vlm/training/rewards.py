@@ -224,7 +224,16 @@ def _value_match(pred_val, gt_val) -> float:
 # ----------------------------------------------------------------------
 
 def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
-    """Negative score for invented keys, duplicate items, garbage text."""
+    """Negative score for invented keys, duplicate items, garbage text,
+    and text field values with low token overlap against GT.
+
+    Text hallucination penalty:
+        For each leaf key present in both pred and GT where the GT value
+        is text (not numeric), apply:
+            penalty = -MAX_TEXT_PENALTY * (1 - token_overlap)
+        Zero overlap = full penalty. Full overlap = no penalty.
+        Total text penalty is capped at -0.15.
+    """
     penalty = 0.0
 
     # Extra keys in pred that aren't in GT — model invented them.
