@@ -13,6 +13,7 @@ from vlm.configs.training_schema import TrainingConfig
 from vlm.data.dataset import CORDDataset
 from vlm.models.receipt_vlm import ReceiptVLM
 from vlm.training.common import (
+    build_instruction,
     ensure_dir,
     prepare_tokenizer,
     set_projector_only_trainable,
@@ -113,6 +114,8 @@ def evaluate_checkpoint(
 
     tokenizer = prepare_tokenizer(model.lm.tokenizer)
 
+    instruction = build_instruction(tokenizer, cfg.model.instruction)
+
     dataset = CORDDataset(
         split=cfg.data.test_split,
         max_samples=max_samples,
@@ -136,7 +139,7 @@ def evaluate_checkpoint(
                 model=model,
                 image=image,
                 tokenizer=tokenizer,
-                instruction=cfg.model.instruction,
+                instruction=instruction,
                 max_completion_tokens=max_completion_tokens,
                 temperature=temperature,
                 do_sample=do_sample,
@@ -236,12 +239,6 @@ def _load_model_with_projector(
         image_height=cfg.vision.image_height,
         image_width=cfg.vision.image_width,
         lm_name=cfg.model.lm_name,
-        cross_attention_projector=cfg.projector.cross_attention,
-        cross_attention_projector_num_queries=cfg.projector.num_queries,
-        cross_attention_projector_num_heads=cfg.projector.num_heads,
-        cross_attention_projector_num_layers=cfg.projector.num_layers,
-        cross_attention_projector_ffn_mult=cfg.projector.ffn_mult,
-        projector_mult=cfg.projector.projector_mult,
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

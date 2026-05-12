@@ -11,7 +11,7 @@ def parse_args() -> argparse.Namespace:
         "--config",
         "-c",
         type=str,
-        default="qwen_sp",
+        default="debug",
         choices=sorted(TRAINING_CONFIGS),
         help="Run config name.",
     )
