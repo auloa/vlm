@@ -37,6 +37,7 @@ class ProjectorConfig:
     num_layers: int = 2
     ffn_mult: int = 4
     projector_mult: int = 2
+    dropout: float | None = None
 
 @dataclass
 class SFTConfig:
@@ -46,7 +47,7 @@ class SFTConfig:
     weight_decay: float = 0.01
     grad_accum_steps: int = 4
     grad_clip_norm: float = 0.5
-    max_target_length: int = 192
+    max_target_length: int = 270
     log_every: int = 10
     sample_every: int = 50
 
@@ -58,7 +59,7 @@ class RLConfig:
     learning_rate: float = 5e-6
     weight_decay: float = 0.01
     temperature: float = 0.7
-    max_completion_tokens: int = 192
+    max_completion_tokens: int = 270
     grad_clip_norm: float = 0.5
     kl_coef: float = 0.02
     log_every: int = 5
@@ -75,7 +76,7 @@ class RLConfig:
 @dataclass
 class EvalConfig:
     num_samples: int = 50
-    max_completion_tokens: int = 192
+    max_completion_tokens: int = 270
     temperature: float = 0.1
 
 

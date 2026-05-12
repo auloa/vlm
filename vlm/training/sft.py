@@ -49,6 +49,7 @@ def train_sft(cfg: TrainingConfig) -> None:
         cross_attention_projector_num_layers=projector_cfg.num_layers,
         cross_attention_projector_ffn_mult=projector_cfg.ffn_mult,
         projector_mult=projector_cfg.projector_mult,
+        projector_dropout=projector_cfg.dropout
     )
 
     tokenizer = prepare_tokenizer(model.lm.tokenizer)

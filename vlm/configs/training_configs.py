@@ -62,6 +62,7 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     cfg.projector.num_layers = 2
     cfg.projector.ffn_mult = 4
     cfg.projector.projector_mult = 2
+    cfg.projector.dropout = None
 
 
     # Supervised fine-tuning
@@ -71,7 +72,7 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     cfg.sft.weight_decay = 0.01
     cfg.sft.grad_accum_steps = 4
     cfg.sft.grad_clip_norm = 0.5
-    cfg.sft.max_target_length = 192
+    cfg.sft.max_target_length = 270
     cfg.sft.log_every = 10
     cfg.sft.sample_every = 40
 
@@ -81,7 +82,7 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     cfg.rl.learning_rate = 5e-6
     cfg.rl.weight_decay = 0.01
     cfg.rl.temperature = 0.7
-    cfg.rl.max_completion_tokens = 192
+    cfg.rl.max_completion_tokens = 270
     cfg.rl.grad_clip_norm = 0.5
     cfg.rl.kl_coef = 0.02
     cfg.rl.log_every = 10
@@ -96,7 +97,7 @@ def _base_receipt_config(name: str) -> TrainingConfig:
 
     # Evaluation
     cfg.eval.num_samples = 50
-    cfg.eval.max_completion_tokens = 192
+    cfg.eval.max_completion_tokens = 270
     cfg.eval.temperature = 0.1
 
     return cfg
@@ -139,6 +140,30 @@ def tlama_sp_n_accum(name: str) -> TrainingConfig:
     return cfg
 
 @register_config
+def tlama_sp_n_accum_bs_4(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.batch_size =4
+    cfg.sft.grad_accum_steps = 1
+    return cfg
+
+@register_config
+def tlama_sp_n_accum_bs_4_tight(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.batch_size =4
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.2
+    cfg.rl.learning_rate = 1e-6
+    return cfg
+
+@register_config
+def tlama_sp_n_accum_bs_4_drp(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.batch_size =4
+    cfg.sft.grad_accum_steps = 1
+    cfg.projector.dropout=0.15
+    return cfg
+
+@register_config
 def tlama_sp_n_accum_tight(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
     cfg.sft.grad_accum_steps = 1
@@ -154,9 +179,47 @@ def tlama_ca(name: str) -> TrainingConfig:
     cfg.rl.kl_coef = 0.07
     return cfg
 
+@register_config
+def tlama_ca_nd(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.batch_size = 4
+    cfg.projector.cross_attention = True
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.1
+    return cfg
 
+@register_config
+def tlama_ca_nd_llr_drp(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.learning_rate = 5e-6
+    cfg.sft.batch_size = 4
+    cfg.projector.cross_attention = True
+    cfg.projector.dropout = 0.15
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.1
+    return cfg
 
+@register_config
+def tlama_sp_n_accum_tight_ppo(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.07
+    cfg.rl.ppo_epochs = 4
+    return cfg
 
+@register_config
+def tlama_sp_n_accum_tight_drop(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.07
+    return cfg
+
+@register_config
+def tlama_sp_n_accum_tight_new_data(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+    cfg.sft.grad_accum_steps = 1
+    cfg.rl.kl_coef = 0.07
+    return cfg
 
 def get_training_config(name: str) -> TrainingConfig:
     name = name.replace("-", "_").replace(" ", "_")

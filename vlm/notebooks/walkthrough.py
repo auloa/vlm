@@ -1,18 +1,3 @@
-"""Walkthrough notebook for the receipt VLM.
-
-What this shows:
-1. Where the parameters live and what's frozen
-2. The shape transformations from image to LM input
-3. SFT vs RL generation on the same image
-4. Reward function breakdown on those outputs
-
-Run from the repo root:
-    uv run marimo edit notebooks/walkthrough.py
-
-The notebook is robust to the RL checkpoint not existing yet — it will
-just show SFT in that case.
-"""
-
 import marimo
 
 __generated_with = "0.23.5"
@@ -26,258 +11,1003 @@ def _():
     return (mo,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Receipt VLM — Walkthrough
+    # vlm — walkthrough
 
-    Frozen Donut encoder + trainable projector + frozen TinyLlama, trained
-    with SFT then aligned with group-relative REINFORCE + KL.
+    A guided tour of the submission. Reads artifacts produced by `train_sft`,
+    `train_rl`, and `evaluate` and renders them inline.
 
-    This notebook walks through:
-    1. Parameter counts and what's trained
-    2. Tensor shapes from image to LM input
-    3. SFT vs RL generation on a sample receipt
-    4. Reward decomposition for the same outputs
+    **Sections:**
+    1. Architecture overview
+    2. Visual token routing (static + live forward pass)
+    3. Dataset (image + parsed GT side by side)
+    4. Training curves
+    5. Cross-run comparison
+    6. Eval results
+    7. Per-sample inspector
+    8. Design decisions (retrospective)
     """)
     return
 
 
 @app.cell
 def _():
-    import torch
+    import json
+    from pathlib import Path
 
-    from vlm.configs.training_configs import get_training_config
-    from vlm.data.dataset import CORDDataset
-    from vlm.models.receipt_vlm import ReceiptVLM
-    from vlm.training.common import build_instruction, prepare_tokenizer
-    from vlm.training.generate import generate_k_outputs
-    from vlm.training.rewards import compute_reward
-    from vlm.utils.device import get_device
+    import pandas as pd
 
-    cfg = get_training_config("receipt-base")
-    device = get_device()
-    return (
-        CORDDataset,
-        ReceiptVLM,
-        build_instruction,
-        cfg,
-        compute_reward,
-        device,
-        generate_k_outputs,
-        prepare_tokenizer,
-        torch,
-    )
+    return Path, json, pd
 
 
 @app.cell(hide_code=True)
-def _(ReceiptVLM, cfg, device, mo, prepare_tokenizer):
-    model = ReceiptVLM(
-        device=device,
-        vision_model_name=cfg.vision.model_name,
-        default_vision_processor=cfg.vision.default_processor,
-        image_height=cfg.vision.image_height,
-        image_width=cfg.vision.image_width,
-        lm_name=cfg.model.lm_name,
-    )
-    tokenizer = prepare_tokenizer(model.lm.tokenizer)
+def _(mo):
+    mo.md("""
+    ## 1. Architecture
 
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    ```
+      image ──► vision encoder ──► visual features
+                                        │
+                                        ▼
+                              projector (MLP + LayerNorm)
+                                        │
+                                        ▼  visual tokens (in LM embedding space)
+                                                                      ┐
+                                                                      │
+                                                                      ├──► concat ──► LM ──► JSON
+                                                                      │
+      instruction ──► tokenize ──► LM embed ──► text embeddings ──────┘
 
-    mo.md(
-        f"""
-        ## Parameter counts
+      Frozen: vision encoder (Donut), language model (TinyLlama).
+      Trainable: projector (~12M params).
+    ```
+    """)
+    return
 
-        | Component | Params | Trainable |
-        |---|---|---|
-        | Donut encoder | {sum(p.numel() for p in model.vision_encoder.parameters()):,} | frozen |
-        | Projector (MLP+LN) | {sum(p.numel() for p in model.projector.parameters()):,} | ✅ |
-        | TinyLlama | {sum(p.numel() for p in model.lm.parameters()):,} | frozen |
-        | **Total** | **{total:,}** | **{trainable:,} ({100*trainable/total:.2f}%)** |
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 2. Visual token routing
+
+    The LM's standard forward pass goes `input_ids → embedding_lookup → transformer`.
+    Visual tokens have no ids — the projector output already lives in the LM's
+    embedding space — so the lookup is bypassed and visual + text embeddings are
+    concatenated directly.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    routing_diagram = mo.md(
+        """
+        ### Sequence layout at training time
+
+        For a single sample with `K=1` (batch=1), the inputs to `lm.model(...)`:
+
+        ```
+        positions:        0 ────────────── 599 │ 600 ──── prompt_len-1 │ prompt_len ─── end
+                          ┌──────────────────┐ ┌─────────────────────┐ ┌────────────────┐
+        inputs_embeds:    │  visual_embeds   │ │  prompt_embeds      │ │  label_embeds  │
+                          │  (1, 600, 2048)  │ │  (1, N_p, 2048)     │ │  (1, N_l-1,    │
+                          │   from projector │ │  from LM.embed      │ │   2048)        │
+                          └──────────────────┘ └─────────────────────┘ └────────────────┘
+                          ┌──────────────────┐ ┌─────────────────────┐ ┌────────────────┐
+        attention_mask:   │  1 1 1 ... 1     │ │  prompt_attn_mask   │ │  label mask    │
+                          └──────────────────┘ └─────────────────────┘ └────────────────┘
+                          ┌──────────────────┐ ┌─────────────────────┐ ┌────────────────┐
+        labels:           │  -100 -100 ...   │ │  -100 -100 ... -100 │ │  target ids    │
+                          └──────────────────┘ └─────────────────────┘ └────────────────┘
+        ```
+
+        Visual prefix is fully masked from loss (`-100`). Prompt is masked too.
+        Only the JSON target tokens contribute gradients.
         """
     )
-    return model, tokenizer
+    routing_diagram
+    return
 
 
 @app.cell(hide_code=True)
-def _(CORDDataset, cfg, mo):
-    val_dataset = CORDDataset(
-        split=cfg.data.val_split,
-        max_samples=20,
-        dataset_name=cfg.data.dataset_name,
-        prefer_high_resolution=True,
+def _(mo):
+    routing_code = mo.md(
+        """
+        ### Code path
+
+        ```python
+        # 1. Encode image, project to LM embedding space (only projector is trainable).
+        visual_embeds = self._get_visual_embeddings(images)      # (B, 600, llm_dim)  The function combines vison encoder plus projection layer
+        text_embeds   = self._embed_input_ids(input_ids)         # (B, N_text, llm_dim)
+
+        # 2. Concatenate.
+        inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
+
+        # 3. Build matching attention mask.
+        visual_attn = torch.ones(B, visual_len, device=device, dtype=torch.long)
+        full_attn   = torch.cat([visual_attn, attention_mask], dim=1)
+
+        # 4. Build labels: -100 over visual prefix and instruction.
+        visual_labels = torch.full((B, visual_len), -100, ...)
+        full_labels   = torch.cat([visual_labels, labels], dim=1)
+
+        # 5. Forward through frozen LM with inputs_embeds (NOT input_ids).
+        out = self.lm.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=full_attn,
+            labels=full_labels,
+        )
+        ```
+
+        At generation time the same `prepare_inputs_embeds` is reused with
+        `model.generate(inputs_embeds=..., attention_mask=...)`.
+        """
     )
+    routing_code
+    return
 
-    sample = val_dataset[0]
-    image = sample["image"]
-    ground_truth = sample["label"]
 
-    mo.md(f"## Sample receipt\n\nGround truth label:\n\n```json\n{ground_truth}\n```")
-    return ground_truth, image
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### Live routing — real tensor shapes
+
+    Loads the model (random projector weights, frozen Donut + TinyLlama) and runs
+    a real forward pass on one CORD image. The shapes below are produced from
+    the actual code path, not hard-coded.
+
+    Click the button to load — first run takes ~30s to download weights.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    load_model_btn = mo.ui.run_button(label="Load model & run forward pass")
+    load_model_btn
+    return (load_model_btn,)
 
 
 @app.cell
-def _(image, mo):
-    mo.image(image, width=400)
+def _(load_model_btn, mo):
+    mo.stop(not load_model_btn.value, mo.md("_press the button to load_"))
+
+    import torch
+    from vlm.models.receipt_vlm import ReceiptVLM
+    from vlm.training.common import build_instruction, prepare_tokenizer
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = ReceiptVLM(
+        device=device,
+        vision_model_name="naver-clova-ix/donut-base-finetuned-cord-v2",
+        default_vision_processor=False,
+        image_height=640,
+        image_width=960,
+        lm_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        cross_attention_projector=False,
+        projector_mult=2,
+    )
+
+    tokenizer = prepare_tokenizer(model.lm.tokenizer)
+    instruction = build_instruction(
+        tokenizer,
+        "Extract the tabular data from this document and output it in JSON format.",
+    )
+    return instruction, model, tokenizer, torch
+
+
+@app.cell
+def _(image, instruction, load_model_btn, mo, model, tokenizer, torch):
+    mo.stop(not load_model_btn.value)
+
+    # Encode the currently-selected dataset image.
+    with torch.no_grad():
+        visual_features = model.vision_encoder([image])
+        visual_embeds = model.projector(visual_features).float()
+
+    # Tokenize the instruction the way the SFT collator does.
+    prompt_ids = tokenizer(instruction, return_tensors="pt", add_special_tokens=True)["input_ids"]
+    with torch.no_grad():
+        prompt_embeds = model.lm.model.get_input_embeddings()(prompt_ids.to(model.device)).float()
+
+    inputs_embeds = torch.cat([visual_embeds, prompt_embeds], dim=1)
+
+    visual_attn = torch.ones(1, visual_embeds.shape[1], device=model.device, dtype=torch.long)
+    prompt_attn = torch.ones_like(prompt_ids).to(model.device)
+    full_attn = torch.cat([visual_attn, prompt_attn], dim=1)
+
+    shapes = {
+        "vision_encoder output (visual_features)": tuple(visual_features.shape),
+        "projector output (visual_embeds)": tuple(visual_embeds.shape),
+        "prompt embeds": tuple(prompt_embeds.shape),
+        "concatenated inputs_embeds (visual | text)": tuple(inputs_embeds.shape),
+        "full attention_mask": tuple(full_attn.shape),
+    }
+
+    mo.md(
+        "**Real tensor shapes from this image:**\n\n"
+        + "\n".join(f"- `{k}`: `{v}`" for k, v in shapes.items())
+        + f"\n\nLM embedding dim: `{visual_embeds.shape[-1]}` — "
+        f"visual_embeds and prompt_embeds share it after the projector."
+    )
+    return full_attn, inputs_embeds, prompt_ids, visual_embeds
+
+
+@app.cell
+def _(full_attn, inputs_embeds, load_model_btn, mo, model, tokenizer, torch):
+    mo.stop(not load_model_btn.value)
+
+    # Generate a short completion to demonstrate the inputs_embeds path works end-to-end.
+    with torch.no_grad():
+        out = model.lm.model.generate(
+            inputs_embeds=inputs_embeds.to(dtype=model.lm.model_dtype),
+            attention_mask=full_attn,
+            max_new_tokens=40,
+            do_sample=False,
+        )
+
+    completion = tokenizer.decode(out[0], skip_special_tokens=True)
+    mo.md(
+        "**Generated completion (random projector — output is gibberish but "
+        "demonstrates the inputs_embeds path works end-to-end):**\n\n"
+        f"```\n{completion}\n```"
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### Label masking — what contributes to the loss
+
+    Training uses the full `[visual | prompt | target]` sequence as input, but
+    only the **target JSON tokens** should contribute gradients. Everything
+    else is masked to `-100` in the labels tensor (PyTorch's ignore index for
+    cross-entropy).
+
+    The breakdown on the currently-selected sample:
+    """)
     return
 
 
 @app.cell
-def _(build_instruction, cfg, image, mo, model, tokenizer, torch):
-    # Architecture walkthrough: show the shape at each step.
+def _(load_model_btn, mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
+    mo.stop(not load_model_btn.value)
 
-    # 1. Image -> Donut features.
-    with torch.no_grad():
-        visual_features = model.vision_encoder([image])
+    import json as _json_mask
 
-    # 2. Visual features -> projector -> visual tokens in LM space.
-    with torch.no_grad():
-        visual_tokens = model.projector(visual_features)
+    # Tokenize the target JSON the way the SFT collator does.
+    target_str = _json_mask.dumps(parsed, ensure_ascii=False)
+    eos = tokenizer.eos_token or ""
+    target_ids = tokenizer(target_str + eos, return_tensors="pt", add_special_tokens=False)["input_ids"]
 
-    # 3. Instruction -> chat-templated -> tokenized -> embedded.
-    instruction = build_instruction(tokenizer, cfg.model.instruction)
-    prompt_tokens = tokenizer(
-        instruction,
-        return_tensors="pt",
-        add_special_tokens=True,
+    visual_len = visual_embeds.shape[1]
+    prompt_len = prompt_ids.shape[1]
+    target_len = target_ids.shape[1]
+    total_len = visual_len + prompt_len + target_len
+
+    # Build the full labels tensor with -100 everywhere except target tokens.
+    full_labels = torch.full((1, total_len), -100, dtype=torch.long)
+    full_labels[0, visual_len + prompt_len : visual_len + prompt_len + target_len] = target_ids[0]
+
+    contributing = (full_labels[0] != -100).sum().item()
+    ignored = (full_labels[0] == -100).sum().item()
+
+    mo.md(
+        f"**Sequence breakdown:**\n\n"
+        f"| Region | Token positions | Length | In loss? |\n"
+        f"|---|---|---|---|\n"
+        f"| Visual prefix | `0 … {visual_len - 1}` | {visual_len} | ❌ masked |\n"
+        f"| Instruction prompt | `{visual_len} … {visual_len + prompt_len - 1}` | {prompt_len} | ❌ masked |\n"
+        f"| Target JSON | `{visual_len + prompt_len} … {total_len - 1}` | {target_len} | ✅ contributes |\n\n"
+        f"**Loss-contributing tokens:** {contributing} / {total_len} "
+        f"({100 * contributing / total_len:.1f}%) — the rest is `-100`.\n\n"
+        f"**Target string ({target_len} tokens):**\n\n"
+        f"```json\n{target_str[:500]}{'...' if len(target_str) > 500 else ''}\n```"
     )
-    prompt_ids = prompt_tokens["input_ids"].to(model.device)
-
-    with torch.no_grad():
-        text_embeds = model.lm.model.get_input_embeddings()(prompt_ids).float()
-
-    # 4. Concat in the LM's continuous embedding space.
-    inputs_embeds = torch.cat([visual_tokens.float(), text_embeds], dim=1)
-
-    shape_table = mo.md(
-        f"""## Tensor shapes through the pipeline
-
-    | Stage | Shape | Notes |
-    |---|---|---|
-    | Image (PIL) | `{image.size}` | (width, height) |
-    | Donut output | `{tuple(visual_features.shape)}` | (batch, n_visual, vis_dim) |
-    | Projector output | `{tuple(visual_tokens.shape)}` | mapped to LM dim |
-    | Instruction tokens | `{tuple(prompt_ids.shape)}` | (batch, n_text) |
-    | Text embeddings | `{tuple(text_embeds.shape)}` | from LM's embedding table |
-    | LM input `inputs_embeds` | `{tuple(inputs_embeds.shape)}` | visual ++ text, fed instead of `input_ids` |
-
-    The LM sees **{inputs_embeds.shape[1]} positions** for this sample (`n_visual + n_text`)."""
-    )
-
-    # Render the chat-templated instruction in its own widget; embedding it
-    # in the markdown above breaks the code-fence indentation because of the
-    # real newlines inside the template.
-    instruction_display = mo.vstack([
-        mo.md("**Chat-templated instruction (verbatim):**"),
-        mo.plain_text(instruction),
-    ])
-
-    mo.vstack([shape_table, instruction_display])
-    return (instruction,)
+    return
 
 
 @app.cell
-def _(cfg, mo):
-    # Load checkpoints. RL may not exist yet if training is still running.
-    from pathlib import Path
+def _(mo):
+    mo.md("""
+    ### Why this masking matters
 
-    sft_path = Path(cfg.sft_best_checkpoint)
-    rl_path = Path(cfg.rl_best_checkpoint)
+    - **Visual prefix masked:** the LM never predicts visual positions — those
+      are inputs, not outputs. Including them in the loss would push the LM
+      to generate visual-embedding-shaped vectors as text, which is nonsense.
+    - **Instruction masked:** the prompt is conditioning context, not something
+      the model needs to learn to reproduce. Including it would waste capacity
+      on memorizing the fixed instruction string.
+    - **Target unmasked:** the model learns to predict JSON tokens
+      autoregressively given visual + prompt context. This is the only part
+      where gradients flow.
 
-    sft_exists = sft_path.exists()
-    rl_exists = rl_path.exists()
+    The cross-entropy is taken over the visible target tokens only, scaled
+    by their count. Empty/missing targets produce zero loss for that sample.
+    """)
+    return
 
-    mo.md(
-        f"""
-        ## Checkpoints
 
-        - SFT: `{sft_path}` → {"✅ found" if sft_exists else "⚠️ missing"}
-        - RL: `{rl_path}` → {"✅ found" if rl_exists else "⚠️ not yet (RL still running?)"}
-        """
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 3. Dataset
+
+    CORD-v2 receipts converted to a simple `{line_items, total}` JSON schema.
+    Pick a sample to see the receipt image alongside the parsed ground truth.
+    """)
+    return
+
+
+@app.cell
+def _():
+    from datasets import load_dataset
+
+    return (load_dataset,)
+
+
+@app.cell
+def _(load_dataset, mo):
+    raw_ds = load_dataset("naver-clova-ix/cord-v2", split="train")
+    mo.md(f"Loaded **{len(raw_ds)}** raw samples.")
+    return (raw_ds,)
+
+
+@app.cell
+def _(mo, raw_ds):
+    ds_idx = mo.ui.slider(
+        start=0,
+        stop=len(raw_ds) - 1,
+        value=0,
+        label="sample index",
+        show_value=True,
     )
-    return Path, rl_exists, rl_path, sft_exists, sft_path
+    ds_idx
+    return (ds_idx,)
+
+
+@app.cell
+def _():
+    from vlm.data.dataset import parse_ground_truth
+
+    return (parse_ground_truth,)
+
+
+@app.cell
+def _(ds_idx, json, parse_ground_truth, raw_ds):
+    sample = raw_ds[ds_idx.value]
+    image = sample["image"]
+    raw_gt = json.loads(sample["ground_truth"])["gt_parse"]
+    parsed = parse_ground_truth(sample["ground_truth"])
+    return image, parsed
+
+
+@app.cell
+def _(image):
+    # Resize for display; CORD images can be huge.
+    w, h = image.size
+    max_w = 400
+    if w > max_w:
+        scale = max_w / w
+        display_img = image.resize((max_w, int(h * scale)))
+    else:
+        display_img = image
+    return (display_img,)
+
+
+@app.cell
+def _(display_img, json, mo, parsed):
+    img_panel = mo.image(display_img, alt="receipt")
+
+
+    parsed_panel = mo.md(
+        f"**Parsed for training:**\n\n"
+        f"```json\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n```"
+    )
+
+    mo.hstack([img_panel, parsed_panel], gap=1, widths="equal")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 4. Training curves
+
+    Pick a run and inspect its SFT and RL TensorBoard scalars. All tags from
+    all sub-writers are loaded; use the multiselect to pick which to chart.
+    """)
+    return
+
+
+@app.cell
+def _(Path):
+    runs_root = Path("training_runs")
+
+    def list_runs() -> list[str]:
+        if not runs_root.exists():
+            return []
+        return sorted(p.name for p in runs_root.iterdir() if p.is_dir())
+
+    return list_runs, runs_root
+
+
+@app.cell
+def _(list_runs, mo):
+    available_runs = list_runs()
+    run_picker = mo.ui.dropdown(
+        options=available_runs,
+        value="tlama_sp_n_accum_bs_4_drp" if "tlama_sp_n_accum_bs_4_drp" in available_runs else (available_runs[0] if available_runs else None),
+        label="run",
+    )
+    run_picker
+    return available_runs, run_picker
+
+
+@app.cell
+def _(run_picker, runs_root):
+    selected_run = run_picker.value
+    if selected_run is None:
+        sft_dir = None
+        rl_dir = None
+        results_dir = None
+    else:
+        run_dir = runs_root / selected_run
+        sft_dir = run_dir / "runs" / "sft"
+        rl_dir = run_dir / "runs" / "rl"
+        results_dir = run_dir / "results"
+    return results_dir, rl_dir, sft_dir
+
+
+@app.cell
+def _(Path):
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    def _event_dirs(root: Path) -> list[Path]:
+        if not root or not root.exists():
+            return []
+        dirs = set()
+        for p in root.rglob("events.out.tfevents.*"):
+            dirs.add(p.parent)
+        return sorted(dirs)
+
+    def load_all_scalars(run_dir):
+        """Load every scalar across all event sub-directories.
+
+        Returns {tag: [(step, value), ...]}. Tags from sub-writers keep their
+        relative subdirectory prefix so series stay distinct.
+        """
+        if run_dir is None:
+            return {}
+        out_ = {}
+        for d in _event_dirs(run_dir):
+            ea = EventAccumulator(str(d), size_guidance={"scalars": 0})
+            ea.Reload()
+            for t in ea.Tags().get("scalars", []):
+                points = [(e.step, e.value) for e in ea.Scalars(t)]
+                if d == run_dir:
+                    key = t
+                else:
+                    rel = d.relative_to(run_dir)
+                    key = f"{rel}::{t}"
+                out_[key] = points
+        return out_
+
+    return (load_all_scalars,)
+
+
+@app.cell
+def _(load_all_scalars, rl_dir, sft_dir):
+    sft_scalars = load_all_scalars(sft_dir)
+    rl_scalars = load_all_scalars(rl_dir)
+    return rl_scalars, sft_scalars
+
+
+@app.cell
+def _(pd):
+    import altair as alt
+
+    def scalars_to_df(scalars_dict: dict) -> pd.DataFrame:
+        rows = []
+        for tag, points in scalars_dict.items():
+            for step, value in points:
+                rows.append({"tag": tag, "step": step, "value": value})
+        return pd.DataFrame(rows)
+
+    def line_chart(df, title=""):
+        if df.empty:
+            return None
+        return (
+            alt.Chart(df)
+            .mark_line()
+            .encode(x="step:Q", y="value:Q", color="tag:N")
+            .properties(width=700, height=300, title=title)
+            .interactive()
+        )
+
+    return alt, line_chart, scalars_to_df
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### SFT
+    """)
+    return
+
+
+@app.cell
+def _(mo, sft_scalars):
+    sft_tags_all = sorted(sft_scalars.keys())
+    sft_tag_picker = mo.ui.multiselect(
+        options=sft_tags_all,
+        value=[t for t in sft_tags_all if "sft_epoch_loss" in t.lower()][:4],
+        label="SFT tags",
+    )
+    sft_tag_picker
+    return (sft_tag_picker,)
+
+
+@app.cell
+def _(line_chart, scalars_to_df, sft_scalars, sft_tag_picker):
+    sft_selected = sft_tag_picker.value
+    sft_df = scalars_to_df({t: sft_scalars[t] for t in sft_selected})
+    line_chart(sft_df, "SFT")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### RL
+    """)
+    return
+
+
+@app.cell
+def _(mo, rl_scalars):
+    rl_tags_all = sorted(rl_scalars.keys())
+    rl_tag_picker = mo.ui.multiselect(
+        options=rl_tags_all,
+        value=[t for t in rl_tags_all if "reward/ema" in t.lower() or "reward/mean" in t.lower()],
+        label="RL tags",
+    )
+    rl_tag_picker
+    return (rl_tag_picker,)
+
+
+@app.cell
+def _(line_chart, rl_scalars, rl_tag_picker, scalars_to_df):
+    rl_selected = rl_tag_picker.value
+    rl_df = scalars_to_df({t: rl_scalars[t] for t in rl_selected})
+    line_chart(rl_df, "RL")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 5. Cross-run comparison
+
+    Pick up to 3 runs and a tag substring. All matching scalars are overlaid
+    on a single chart, color-coded by run.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(available_runs, mo):
+    compare_runs = mo.ui.multiselect(
+        options=available_runs,
+        value=available_runs[: min(2, len(available_runs))],
+        label="runs to compare (max 3)",
+        max_selections=3,
+    )
+    compare_stage = mo.ui.dropdown(
+        options=["sft", "rl"],
+        value="sft",
+        label="stage",
+    )
+    compare_tag_substring = mo.ui.text(
+        value="epoch_loss",
+        label="tag substring",
+    )
+
+    mo.hstack([compare_runs, compare_stage, compare_tag_substring])
+    return compare_runs, compare_stage, compare_tag_substring
 
 
 @app.cell
 def _(
-    Path,
-    cfg,
-    device,
-    generate_k_outputs,
-    image,
-    instruction,
-    model,
-    rl_exists,
-    rl_path,
-    sft_exists,
-    sft_path,
-    tokenizer,
-    torch,
+    alt,
+    compare_runs,
+    compare_stage,
+    compare_tag_substring,
+    load_all_scalars,
+    pd,
+    runs_root,
 ):
-    def _generate_with_checkpoint(ckpt_path: Path) -> str:
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.projector.load_state_dict(ckpt["projector_state_dict"])
-        model.projector.eval()
+    compare_rows = []
+    for run_name in compare_runs.value:
+        stage_dir = runs_root / run_name / "runs" / compare_stage.value
+        scalars = load_all_scalars(stage_dir)
+        substring = compare_tag_substring.value.lower()
+        for tag, points in scalars.items():
+            if substring and substring not in tag.lower():
+                continue
+            for step, value in points:
+                compare_rows.append({
+                    "run": run_name,
+                    "tag": tag,
+                    "step": step,
+                    "value": value,
+                    "series": f"{run_name} :: {tag}",
+                })
 
-        with torch.no_grad():
-            gen = generate_k_outputs(
-                model=model,
-                image=image,
-                tokenizer=tokenizer,
-                instruction=instruction,
-                k=1,
-                max_completion_tokens=cfg.eval.max_completion_tokens,
-                temperature=cfg.eval.temperature,
-                do_sample=False,
+    compare_df = pd.DataFrame(compare_rows)
+    if compare_df.empty:
+        compare_chart = None
+    else:
+        compare_chart = (
+            alt.Chart(compare_df)
+            .mark_line()
+            .encode(
+                x="step:Q",
+                y="value:Q",
+                color="series:N",
+                strokeDash="run:N",
             )
-        return gen.texts[0].strip()
+            .properties(width=700, height=350, title="Cross-run comparison")
+            .interactive()
+        )
 
-    sft_output = _generate_with_checkpoint(sft_path) if sft_exists else None
-    rl_output = _generate_with_checkpoint(rl_path) if rl_exists else None
-    return rl_output, sft_output
+    compare_chart
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 6. Eval results
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(json, mo, results_dir):
+    if results_dir is None:
+        comparison = None
+        comparison_msg = mo.md("_no run selected_")
+    else:
+        comparison_path = results_dir / "eval_comparison.json"
+        if comparison_path.exists():
+            with open(comparison_path) as f:
+                comparison = json.load(f)
+            comparison_msg = mo.md(f"Loaded `{comparison_path}`")
+        else:
+            comparison = None
+            comparison_msg = mo.md(f"`{comparison_path}` not found — run `evaluate.py`.")
+
+    comparison_msg
+    return (comparison,)
 
 
 @app.cell
-def _(ground_truth, mo, rl_output, sft_output):
-    if sft_output is None:
-        mo.md("⚠️ Skipping SFT generation — no checkpoint.")
+def _(comparison, mo, pd):
+    if comparison is None:
+        eval_df = None
+        out__ = mo.md("_no eval data_")
     else:
-        gt_block = f"### Ground truth\n```json\n{ground_truth}\n```"
-        sft_block = f"### SFT output\n```\n{sft_output}\n```"
+        sft_metrics = comparison.get("sft", {})
+        rl_metrics = comparison.get("rl", {})
+        metrics = [
+            "format_adherence_rate",
+            "strict_json_rate",
+            "extractable_json_rate",
+            "required_keys_rate",
+            "total_present_rate",
+            "total_match_rate",
+            "mean_reward",
+        ]
+        rows = []
+        for m in metrics:
+            s = sft_metrics.get(m)
+            r = rl_metrics.get(m)
+            delta = (r - s) if (s is not None and r is not None) else None
+            rows.append({"metric": m, "sft": s, "rl": r, "delta": delta})
+        eval_df = pd.DataFrame(rows)
+        out__ = eval_df
+    out__
+    return
 
-        if rl_output is None:
-            mo.md(f"## Generation\n\n{gt_block}\n\n{sft_block}\n\n*(RL checkpoint not available yet.)*")
-        else:
-            rl_block = f"### RL output\n```\n{rl_output}\n```"
-            mo.md(f"## Generation: SFT vs RL\n\n{gt_block}\n\n{sft_block}\n\n{rl_block}")
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 7. Per-sample inspector
+
+    Each sample shows ground truth, SFT prediction, and RL prediction side
+    by side, with format / total-match flags.
+    """)
     return
 
 
 @app.cell
-def _(compute_reward, ground_truth, mo, rl_output, sft_output):
-    def _row(label, output):
-        if output is None:
-            return None
-        b = compute_reward(output, ground_truth)
-        return (
-            f"| {label} | {b.total:.3f} | {b.format:.2f} | {b.schema:.2f} | "
-            f"{b.content:.2f} | {b.hallucination:+.2f} |"
-        )
+def _(json, results_dir):
+    def _load_jsonl(path):
+        if not path.exists():
+            return []
+        with open(path) as f:
+            return [json.loads(line) for line in f if line.strip()]
 
-    rows = [r for r in [_row("SFT", sft_output), _row("RL", rl_output)] if r]
-
-    if not rows:
-        mo.md("⚠️ No outputs to score.")
+    if results_dir is None:
+        sft_samples = []
+        rl_samples = []
     else:
-        mo.md(
-            "## Reward breakdown\n\n"
-            "Components clipped to [0, 1] in `total`. Maximum per-component is "
-            "0.30 for format/schema/content; hallucination is a penalty (≤ 0).\n\n"
-            "| Checkpoint | Total | Format | Schema | Content | Hallucination |\n"
-            "|---|---|---|---|---|---|\n"
-            + "\n".join(rows)
+        sft_samples = _load_jsonl(results_dir / "eval_sft" / "samples.jsonl")
+        rl_samples = _load_jsonl(results_dir / "eval_rl" / "samples.jsonl")
+    return rl_samples, sft_samples
+
+
+@app.cell
+def _(mo, sft_samples):
+    if not sft_samples:
+        sample_picker = None
+        msg = mo.md("_no samples — run evaluate.py_")
+    else:
+        sample_picker = mo.ui.slider(
+            start=0,
+            stop=len(sft_samples) - 1,
+            value=0,
+            label="sample index",
         )
+        msg = sample_picker
+    msg
+
+    return (sample_picker,)
+
+
+@app.cell(hide_code=True)
+def _(mo, rl_samples, sample_picker, sft_samples):
+    if sample_picker is None or not sft_samples:
+        view = mo.md("")
+    else:
+        idx = sample_picker.value
+        sft_s = sft_samples[idx]
+        rl_s = rl_samples[idx] if idx < len(rl_samples) else {}
+
+        view = mo.md(
+            "**Ground truth:**\n\n"
+            f"```json\n{sft_s.get('ground_truth', '')}\n```\n\n"
+            f"**SFT** — format_adherent={sft_s.get('format_adherent')}, "
+            f"total_match={sft_s.get('total_match')}, "
+            f"key_coverage={sft_s.get('key_coverage', 0):.1%}, "
+            f"value_accuracy={sft_s.get('value_accuracy', 0):.1%}, "
+            f"reward={sft_s.get('reward', 0):.3f}\n\n"
+            f"```json\n{sft_s.get('prediction', '')}\n```\n\n"
+            f"**RL** — format_adherent={rl_s.get('format_adherent')}, "
+            f"total_match={rl_s.get('total_match')}, "
+            f"key_coverage={rl_s.get('key_coverage', 0):.1%}, "
+            f"value_accuracy={rl_s.get('value_accuracy', 0):.1%}, "
+            f"reward={rl_s.get('reward', 0):.3f}\n\n"
+            f"```json\n{rl_s.get('prediction', '')}\n```"
+        )
+    view
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pd, rl_samples, sft_samples):
+    if not sft_samples or not rl_samples:
+        summary_df = None
+        summary_out = mo.md("_need both SFT and RL samples for summary_")
+    else:
+        n = min(len(sft_samples), len(rl_samples))
+        improved = regressed = unchanged = 0
+        tm_gained = tm_lost = 0
+        for i in range(n):
+            sr = sft_samples[i].get("reward", 0) or 0
+            rr = rl_samples[i].get("reward", 0) or 0
+            stm = sft_samples[i].get("total_match", False)
+            rtm = rl_samples[i].get("total_match", False)
+            if rr > sr + 1e-6:
+                improved += 1
+            elif rr < sr - 1e-6:
+                regressed += 1
+            else:
+                unchanged += 1
+            if not stm and rtm:
+                tm_gained += 1
+            elif stm and not rtm:
+                tm_lost += 1
+        summary_df = pd.DataFrame([
+            {"category": "RL reward > SFT", "count": improved},
+            {"category": "RL reward < SFT", "count": regressed},
+            {"category": "RL reward == SFT", "count": unchanged},
+            {"category": "Gained total_match", "count": tm_gained},
+            {"category": "Lost total_match", "count": tm_lost},
+        ])
+        summary_out = summary_df
+    summary_out
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 8. Design decisions
+
+    Short retrospective on the choices that shaped this submission, with the
+    evidence behind each.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Vision encoder: Donut over CLIP/SigLIP
+
+    Donut is pretrained on document images with a text-decoding objective.
+    At the same parameter scale CLIP/SigLIP encode for object semantics — the
+    wrong inductive bias for dense receipt text. Picked Donut for its CORD
+    fine-tune; dropped the BART decoder, kept only the encoder.
+
+    Image processor's resize is overridden to 640×960 — default Donut targets
+    ~2560×1920 and produces ~4800 visual tokens, blowing past TinyLlama's
+    context window.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### CORD-native schema: verbatim keys
+
+    The training target uses CORD's `gt_parse` keys directly (`nm`, `cnt`,
+    `price`, `sub_total`, `total_price`, `cashprice`, etc.) with no renaming.
+    Every field visible on the receipt maps to a target token.
+
+    Renaming or dropping fields introduces "ignore this visible region" signal.
+    If the receipt shows a service charge but the schema has no place for it,
+    the model learns to suppress that visual signal — weakening grounding across
+    all samples, not just ones with service charges.
+
+    **Alternative explored:** flat schema `{line_items, total}`. Easier to
+    learn (100% format adherence in 15 epochs vs 4% for the full CORD schema),
+    but trains the model to ignore 60-70% of visible receipt content. Not the
+    right design for a digitization task.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Projector: MLP + LayerNorm
+
+    Two-layer MLP from `vis_dim` to `2 × llm_dim` to `llm_dim`, with output
+    LayerNorm. The LayerNorm was added after early runs where the LM ignored
+    the visual prefix entirely — pre-norm outputs sat at magnitudes the frozen
+    LM attention didn't react to.
+
+    **Alternative tried:** cross-attention resampler with 64 learned queries
+    (~92M trainable params vs 12M for MLP). Val loss climbed from epoch 7 — a
+    128,000:1 parameter-to-sample ratio on 720 receipts. The attention queries
+    learn sample-specific visual fingerprints rather than generalizable patterns.
+    Bridge capacity is not the bottleneck; the MLP stayed.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Language model: TinyLlama
+
+    Small chat-tuned LM that fits on a single consumer GPU alongside the vision
+    encoder. Used `tokenizer.apply_chat_template` at runtime — an earlier
+    hand-written prompt suffix caused the model to leak its own role tokens.
+
+    **Alternative tried:** Qwen-2.5-1.5B for better Indonesian coverage (CORD
+    is largely Indonesian). Output distributions shifted toward coherent
+    Indonesian dish names. Item names still didn't match the actual receipt —
+    sampling from a better prior, not reading the image better. Visual grounding
+    is the bottleneck, not vocabulary.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Reward: dynamic per-key grading
+
+    The content reward walks the GT structure recursively and scores only keys
+    present in that sample's GT. Money fields use tolerant numeric match (strip
+    separators). Text fields use token overlap. Score = coverage × value_accuracy.
+
+    This means: adding new fields to the parser changes what gets scored without
+    touching the reward function. A model producing extra keys is penalized.
+    No static key list to maintain.
+
+    Final weights: format 0.30 / schema 0.30 / content 0.40. Format and schema
+    weighted heavily because with the richer CORD-native schema the model needs
+    strong structural signal to maintain JSON shape during RL.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### Training: batch size and dropout
+
+    Batch 4 (no gradient accumulation) outperformed larger effective batch sizes
+    on val loss minimum. With ~720 training samples and 15 epochs, smaller batches
+    do ~4× more optimizer steps per epoch — larger batches don't converge within
+    the same epoch budget.
+
+    Dropout (p=0.1) in the projector prevents late-epoch val loss from climbing.
+    Without dropout: val bottoms at epoch 9 then rises (overfitting). With dropout:
+    val stays flat or keeps declining — a flatter, more RL-stable minimum.
+
+    The dropout run trains more slowly — at epoch 15 it's still converging.
+    The richer CORD-native schema needs more epochs than 15 to fully converge
+    with dropout. This is the primary limitation of the submitted model.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### RL: GRPO with PPO clipping, ppo_epochs=1
+
+    The loop implements the clipped PPO surrogate with snapshotted old log-probs.
+    At `ppo_epochs=1` clipping is a no-op. Tried `ppo_epochs=4` — no improvement.
+
+    Step-based EMA-reward checkpointing. RL reward peaks around step 100, dips
+    sharply around step 300 (noisy advantages from K=4 on an undertrained SFT
+    model), partially recovers. Best-EMA checkpoint captures the early peak.
+
+    RL consistently improves over SFT on all metrics despite the low absolute
+    numbers. The low starting point (4% SFT format adherence) makes each update
+    noisier — most K=4 rollouts are garbage, giving near-zero advantage variance
+    and skipped steps.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ### What didn't work / wasn't enough
+
+    - **Visual grounding is the ceiling.** Frozen LM can't learn to attend to
+      visual tokens. The projector must find the one subspace of the frozen LM's
+      embedding space where frozen attention happens to respond — can't teach the
+      LM to attend, only approximate grounding through a fixed bottleneck.
+    - **Resampler overfits aggressively.** 92M params on 720 samples. Stopped
+      early, no useful checkpoint.
+    - **Qwen didn't fix grounding.** Better prior, same bottleneck.
+    - **RL on no-dropout SFT degraded every metric.** Sharp SFT minimum +
+      noisy RL advantages = policy destabilization. Dropout checkpoint is more
+      RL-stable even at lower absolute performance.
+
+    Real fix: LoRA on LM attention layers. 2-4M params, lets the LM actually
+    learn to attend to the visual prefix. Out of scope for this assignment.
+    """)
     return
 
 

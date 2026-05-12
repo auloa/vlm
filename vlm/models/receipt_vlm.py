@@ -23,6 +23,7 @@ class ReceiptVLM(nn.Module):
         cross_attention_projector_num_heads: int = 8,
         cross_attention_projector_num_layers: int = 2,
         cross_attention_projector_ffn_mult: int = 4,
+        projector_dropout:float|None=None,
         projector_mult: int = 4,
         freeze_vision: bool = True,
         freeze_lm: bool = True,
@@ -52,16 +53,18 @@ class ReceiptVLM(nn.Module):
             self.projector = PerceiverResampler(
                 vis_dim=self.vision_encoder.hidden_size,
                 llm_dim=self.lm.hidden_size,
-                num_queries=64,
-                num_heads=8,
-                num_layers=2,
-                ffn_mult=4,
+                num_queries=cross_attention_projector_num_queries,
+                num_heads=cross_attention_projector_num_heads,
+                num_layers=cross_attention_projector_num_layers,
+                ffn_mult=cross_attention_projector_ffn_mult,
+                dropout=projector_dropout
             ).to(self.device)
         else:
             self.projector = Projector(
                 vis_dim=self.vision_encoder.hidden_size,
                 llm_dim=self.lm.hidden_size,
                 projector_ffn_mult = projector_mult,
+                dropout=projector_dropout
             ).to(self.device)
 
     def _get_visual_embeddings(self, images: list[Image.Image]) -> torch.Tensor:

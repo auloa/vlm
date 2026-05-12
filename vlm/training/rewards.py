@@ -1,21 +1,23 @@
 """
 Reward function for RL alignment of the receipt VLM.
 
-Aligned to the assignment spec:
-    "Reward formatting compliance and schema adherence;
-     penalize hallucinations, unformatted text blocks, or malformed JSON."
+The schema mirrors CORD's gt_parse: menu (list of items), sub_total (dict),
+total (dict), void_menu (rare). The model never sees a fixed key set — it
+learns to extract whatever fields the ground truth contains for that receipt.
 
-Components:
-    format        up to 0.30   valid JSON, preferably no surrounding text
-    schema        up to 0.30   required keys present and correctly typed
-    content       up to 0.30   line item count + total accuracy + name overlap
-    hallucination negative     duplicate items, garbage text, excessive output
+Reward components (final score clipped to [0, 1]):
+    format         0-0.30   strict JSON parseable, no wrapping prose
+    schema         0-0.30   correct structural shape (menu list, total dict)
+    content        0-0.40   dynamic per-key grading against ground truth
+    hallucination  ≤ 0      extra keys, duplicate items, leaked tokens, garbage
 
-Format and schema saturate at SFT, so their weights are reduced to maintain
-the signal without dominating. Content gets the bulk of the budget since it
-is the only component with meaningful headroom after SFT.
+Content grading walks the GT recursively. For each leaf key, the model is
+scored by:
+    - Money fields (digit-heavy values): tolerant numeric match
+    - Text fields: token overlap
 
-The final reward is clipped to [0, 1].
+The final content score combines coverage (% of GT keys present in pred) with
+value accuracy (avg per-key match score for matched keys).
 """
 
 import re
@@ -32,10 +34,6 @@ class RewardBreakdown:
     schema: float
     content: float
     hallucination: float
-
-
-REQUIRED_TOP_KEYS = {"line_items", "total"}
-REQUIRED_ITEM_KEYS = {"name", "count", "price"}
 
 
 def compute_reward(generated: str, ground_truth: str) -> RewardBreakdown:
@@ -71,128 +69,214 @@ def compute_reward(generated: str, ground_truth: str) -> RewardBreakdown:
     )
 
 
+# ----------------------------------------------------------------------
+# Format
+# ----------------------------------------------------------------------
+
 def _format_score(text: str, parsed) -> float:
-    """Reward clean JSON most, wrapped-but-parseable JSON less."""
+    """Reward clean JSON, partial credit for wrapped-but-parseable."""
     if parsed is None:
-        return 0.0
+        looks_jsonish = "{" in text and "}" in text
+        return 0.05 if looks_jsonish else 0.0
 
-    # Strict JSON: the full generated string is the JSON object.
-    if parse_json_object(text) is not None and text.startswith("{") and text.endswith("}"):
-        return 0.25
+    if text.startswith("{") and text.endswith("}"):
+        return 0.30
 
-    # Parseable JSON exists, but the model added extra prose around it.
-    return 0.05
+    # Parseable JSON exists but wrapped in prose.
+    return 0.10
 
+
+# ----------------------------------------------------------------------
+# Schema
+# ----------------------------------------------------------------------
 
 def _schema_score(parsed) -> float:
-    """Reward required receipt schema."""
+    """Reward correct receipt structure (menu list + total dict)."""
     if not isinstance(parsed, dict):
         return 0.0
 
     score = 0.0
 
-    if "line_items" in parsed:
-        score += 0.05
+    # Has menu key as a list
+    menu = parsed.get("menu")
+    if menu is not None:
+        score += 0.08
+        if isinstance(menu, list) and menu:
+            score += 0.08
+            # Items are dicts with at least nm and price
+            well_formed = sum(
+                1 for it in menu
+                if isinstance(it, dict) and "nm" in it and "price" in it
+            )
+            score += 0.08 * (well_formed / len(menu))
 
-    if "total" in parsed:
-        score += 0.05
-
-    items = parsed.get("line_items")
-    if not isinstance(items, list):
-        return score
-
-    score += 0.05
-
-    if not items:
-        return score
-
-    well_formed = sum(
-        1
-        for item in items
-        if isinstance(item, dict) and REQUIRED_ITEM_KEYS.issubset(item.keys())
-    )
-
-    score += 0.075 * (well_formed / len(items))
-
-    return min(0.3, score)
-
-
-def _content_score(parsed: dict, gt: dict) -> float:
-    """Reward item count similarity, total match, and item-name overlap."""
-    score = 0.0
-
-    pred_items = parsed.get("line_items") or []
-    gt_items = gt.get("line_items") or []
-
-    if isinstance(pred_items, list) and isinstance(gt_items, list) and gt_items:
-        ratio = min(len(pred_items), len(gt_items)) / max(len(pred_items), len(gt_items))
-        score += 0.20 * ratio
-
-    pred_total = _digits_only(parsed.get("total", ""))
-    gt_total = _digits_only(gt.get("total", ""))
-
-    if pred_total and gt_total:
-        if pred_total == gt_total:
-            score += 0.15
-        elif pred_total in gt_total or gt_total in pred_total:
-            score += 0.05
-
-    pred_names = _name_tokens(pred_items)
-    gt_names = _name_tokens(gt_items)
-
-    if pred_names and gt_names:
-        overlap = len(pred_names & gt_names) / len(gt_names)
-        score += 0.15 * min(1.0, overlap)
+    # Has total dict with total_price
+    total = parsed.get("total")
+    if total is not None:
+        score += 0.02
+        if isinstance(total, dict) and total.get("total_price"):
+            score += 0.04
 
     return min(0.30, score)
 
 
+# ----------------------------------------------------------------------
+# Content: dynamic per-key grading
+# ----------------------------------------------------------------------
+
+def _content_score(pred: dict, gt: dict) -> float:
+    """Walk GT recursively, score each leaf key against the prediction.
+
+    Returns coverage * value_accuracy, scaled to max 0.60.
+    """
+    gt_leaves = _flatten_leaves(gt)
+    pred_leaves = _flatten_leaves(pred)
+
+    if not gt_leaves:
+        return 0.0
+
+    # Per-key score for keys that exist in both pred and gt.
+    matched_scores = []
+    for path, gt_val in gt_leaves.items():
+        if path in pred_leaves:
+            matched_scores.append(_value_match(pred_leaves[path], gt_val))
+
+    coverage = len(matched_scores) / len(gt_leaves)
+    value_acc = sum(matched_scores) / len(matched_scores) if matched_scores else 0.0
+
+    return 0.40 * coverage * value_acc
+
+
+def flatten_leaves(obj, prefix: str = "") -> dict[str, str]:
+    """Public alias — see _flatten_leaves."""
+    return _flatten_leaves(obj, prefix)
+
+
+def value_match(pred_val, gt_val) -> float:
+    """Public alias — see _value_match."""
+    return _value_match(pred_val, gt_val)
+
+
+def _flatten_leaves(obj, prefix: str = "") -> dict[str, str]:
+    """Flatten a nested dict/list into {path: value} leaf entries.
+
+    Lists are indexed: `menu[0].nm`. Dicts are dot-separated: `total.total_price`.
+    Only leaf values (strings/numbers) appear in the output.
+    """
+    out: dict[str, str] = {}
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            new_prefix = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, (dict, list)):
+                out.update(_flatten_leaves(v, new_prefix))
+            else:
+                out[new_prefix] = str(v) if v is not None else ""
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            new_prefix = f"{prefix}[{i}]"
+            if isinstance(item, (dict, list)):
+                out.update(_flatten_leaves(item, new_prefix))
+            else:
+                out[new_prefix] = str(item) if item is not None else ""
+
+    return out
+
+
+def _value_match(pred_val, gt_val) -> float:
+    """Score a single value match. Returns a float in [0, 1].
+
+    Auto-detects field type:
+    - Money-like (mostly digits): tolerant numeric match (strip separators)
+    - Text: graded token overlap
+    """
+    pred_str = str(pred_val) if pred_val is not None else ""
+    gt_str = str(gt_val) if gt_val is not None else ""
+
+    if not gt_str:
+        return 1.0 if not pred_str else 0.0
+
+    gt_digits = _digits_only(gt_str)
+    digit_density = len(gt_digits) / max(len(gt_str), 1)
+
+    # Money-like: digits dominate the GT value
+    if digit_density >= 0.50 and gt_digits:
+        pred_digits = _digits_only(pred_str)
+        if pred_digits == gt_digits:
+            return 1.0
+        if pred_digits and (pred_digits in gt_digits or gt_digits in pred_digits):
+            return 0.5
+        return 0.0
+
+    # Text: token overlap
+    gt_tokens = set(re.findall(r"\b\w+\b", gt_str.lower()))
+    pred_tokens = set(re.findall(r"\b\w+\b", pred_str.lower()))
+
+    if not gt_tokens:
+        return 1.0 if not pred_tokens else 0.0
+
+    overlap = len(gt_tokens & pred_tokens) / len(gt_tokens)
+    return min(1.0, overlap)
+
+
+# ----------------------------------------------------------------------
+# Hallucination
+# ----------------------------------------------------------------------
+
 def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
-    """Negative score for duplicate, excessive, or garbage-like outputs."""
+    """Negative score for invented keys, duplicate items, garbage text."""
     penalty = 0.0
 
-    items = parsed.get("line_items") if isinstance(parsed, dict) else None
+    # Extra keys in pred that aren't in GT — model invented them.
+    gt_leaves = _flatten_leaves(gt) if isinstance(gt, dict) else {}
+    pred_leaves = _flatten_leaves(parsed) if isinstance(parsed, dict) else {}
 
-    if isinstance(items, list) and len(items) > 1:
-        signatures = [
-            _norm(item.get("name", ""))
-            for item in items
-            if isinstance(item, dict)
-        ]
+    extra = set(pred_leaves) - set(gt_leaves)
+    if extra:
+        # cap at -0.20; scale gently — 1 extra key = -0.02, 10+ = -0.20
+        penalty -= min(0.20, 0.02 * len(extra))
 
-        if signatures:
-            duplicate_ratio = 1.0 - (len(set(signatures)) / len(signatures))
+    # Duplicate menu items (same name).
+    if isinstance(parsed, dict):
+        menu = parsed.get("menu")
+        if isinstance(menu, list) and len(menu) > 1:
+            names = [
+                _norm(it.get("nm", ""))
+                for it in menu
+                if isinstance(it, dict)
+            ]
+            if names:
+                dup_ratio = 1.0 - (len(set(names)) / len(names))
+                if dup_ratio > 0.50:
+                    penalty -= 0.10
+                elif dup_ratio > 0.25:
+                    penalty -= 0.05
 
-            if duplicate_ratio > 0.50:
-                penalty -= 0.10
-            elif duplicate_ratio > 0.25:
-                penalty -= 0.05
+    # Excessive menu length vs GT.
+    gt_menu = gt.get("menu") if isinstance(gt, dict) else None
+    pred_menu = parsed.get("menu") if isinstance(parsed, dict) else None
+    if (
+        isinstance(pred_menu, list)
+        and isinstance(gt_menu, list)
+        and gt_menu
+        and len(pred_menu) > 3 * len(gt_menu)
+    ):
+        penalty -= 0.05
 
-    gt_items = gt.get("line_items")
-    if isinstance(items, list) and isinstance(gt_items, list) and gt_items and len(items) > 3 * len(gt_items):
-            penalty -= 0.05
-
+    # Leaked role tokens.
     if "<|user|>" in text or "<|assistant|>" in text:
         penalty -= 0.10
 
-    # Penalize when the total digits don't match ground truth at all.
-    pred_total = _digits_only(parsed.get("total", ""))
-    gt_total = _digits_only(gt.get("total", ""))
-    if pred_total and gt_total and pred_total != gt_total:
-        # check for any partial match of digits. if overlap of digits  is not 50% or more then penalize more
-        overlap = len(set(pred_total) & set(gt_total)) / max(len(set(pred_total)), len(set(gt_total)))
-        if overlap < 0.5:
-            penalty -= 0.10
-        else:
-            penalty -= 0.05
-
-
-
+    # Repeated character runs (garbage output).
     if _repeated_char_ratio(text) > 0.50:
         penalty -= 0.05
 
     return penalty
 
+
+# ----------------------------------------------------------------------
+# Utilities
+# ----------------------------------------------------------------------
 
 def _digits_only(value) -> str:
     return re.sub(r"\D", "", str(value))
@@ -202,27 +286,8 @@ def _norm(value) -> str:
     return re.sub(r"\s+", " ", str(value).lower().strip())
 
 
-def _name_tokens(items) -> set[str]:
-    """Set of word tokens from all predicted or ground-truth item names."""
-    tokens: set[str] = set()
-
-    if not isinstance(items, list):
-        return tokens
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        name = _norm(item.get("name", ""))
-        tokens.update(re.findall(r"\b\w+\b", name))
-
-    return tokens
-
-
-
 def _repeated_char_ratio(text: str) -> float:
     if len(text) < 2:
         return 0.0
-
     repeated = sum(1 for a, b in pairwise(text) if a == b)
     return repeated / (len(text) - 1)

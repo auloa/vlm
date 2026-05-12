@@ -54,13 +54,14 @@ class PerceiverResampler(nn.Module):
     """
 
     def __init__(
-        self,
-        vis_dim: int,
-        llm_dim: int,
-        num_queries: int = 64,
-        num_heads: int = 8,
-        num_layers: int = 2,
-        ffn_mult: int = 4,
+            self,
+            vis_dim: int,
+            llm_dim: int,
+            num_queries: int = 64,
+            num_heads: int = 8,
+            num_layers: int = 2,
+            ffn_mult: int = 4,
+            dropout: float | None = None
     ):
         super().__init__()
 
@@ -81,6 +82,9 @@ class PerceiverResampler(nn.Module):
 
         self.final_norm = nn.LayerNorm(llm_dim)
 
+        # Dropout between resampler layers. If `dropout` is None or 0.0, this is a no-op.
+        self.dropout = nn.Dropout(dropout) if (dropout is not None and dropout > 0.0) else nn.Identity()
+
     def forward(self, visual_features: torch.Tensor) -> torch.Tensor:
         visual_features = visual_features.float()
 
@@ -89,5 +93,6 @@ class PerceiverResampler(nn.Module):
 
         for block in self.blocks:
             queries = block(queries, visual_features)
+            queries = self.dropout(queries)
 
         return self.final_norm(queries)
