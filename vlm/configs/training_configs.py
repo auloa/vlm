@@ -174,6 +174,8 @@ def ca_b4_e20(name: str) -> TrainingConfig:
     cfg.projector.cross_attention = True
     cfg.sft.batch_size = 4
     cfg.sft.epochs = 20
+    cfg.sft.learning_rate = 1e-5
+    cfg.sft.learning_rate = 1e-5
     cfg.sft.grad_accum_steps = 1
     return cfg
 
