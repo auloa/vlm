@@ -118,19 +118,19 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 **Key config fields:**
 
 | Section | Field | Default | What it controls |
-|---|---|---|---|
-| `sft` | `epochs` | 15 | SFT training epochs |
-| `sft` | `batch_size` | 4 | Batch size (no accumulation) |
-| `sft` | `learning_rate` | 5e-5 | AdamW LR for SFT |
-| `sft` | `max_target_length` | 256 | Max target tokens; longer samples dropped |
-| `rl` | `completions_per_image` | 4 | K for group-relative advantages (≥ 2) |
-| `rl` | `learning_rate` | 5e-6 | AdamW LR for RL |
-| `rl` | `kl_coef` | 0.02 | KL penalty weight against SFT reference |
-| `rl` | `temperature` | 0.7 | Sampling temperature for RL rollouts |
-| `vision` | `image_height/width` | 640×960 | Resize target for Donut processor |
-| `projector` | `cross_attention` | False | Use resampler instead of MLP |
-| `projector` | `dropout` | 0.15 | Dropout rate in projector |
-| `eval` | `num_samples` | 50 | Test samples for evaluation |
+|---|---|---------|---|
+| `sft` | `epochs` | 15      | SFT training epochs |
+| `sft` | `batch_size` | 4       | Batch size (no accumulation) |
+| `sft` | `learning_rate` | 5e-5    | AdamW LR for SFT |
+| `sft` | `max_target_length` | 256     | Max target tokens; longer samples dropped |
+| `rl` | `completions_per_image` | 4       | K for group-relative advantages (≥ 2) |
+| `rl` | `learning_rate` | 5e-6    | AdamW LR for RL |
+| `rl` | `kl_coef` | 0.02    | KL penalty weight against SFT reference |
+| `rl` | `temperature` | 0.7     | Sampling temperature for RL rollouts |
+| `vision` | `image_height/width` | 960x640 | Resize target for Donut processor |
+| `projector` | `cross_attention` | False   | Use resampler instead of MLP |
+| `projector` | `dropout` | 0.15    | Dropout rate in projector |
+| `eval` | `num_samples` | 50      | Test samples for evaluation |
 
 Full dataclass definitions in `vlm/configs/training_schema.py`.
 
@@ -163,7 +163,7 @@ self.model = full_model.encoder
 del full_model
 ```
 
-The image processor's resize is overridden to 640×960. The default Donut processor targets ~2560×1920, producing ~4800 visual tokens that exceed TinyLlama's context window. At 640×960 the count drops to 600.
+The image processor's resize is overridden to 960x640. The default Donut processor targets ~2560×1920, producing ~4800 visual tokens that exceed TinyLlama's context window. At 640×960 the count drops to 600.
 
 ### Visual token routing
 
@@ -407,7 +407,7 @@ The run includes multiple near-perfect and exact-match predictions, confirming t
 
 ## Scaling to Production
 
-**Multi-page documents.** Donut at 640×960 isn't sufficient for dense forms. Context limits become a bottleneck at a few pages. Higher resolution, page tiling, or per-page encoding with merged extraction needed for bill of lading scale.
+**Multi-page documents.** Donut at 960x640 isn't sufficient for dense forms. Context limits become a bottleneck at a few pages. Higher resolution, page tiling, or per-page encoding with merged extraction needed for bill of lading scale.
 
 **Visual grounding.** Bills of lading are denser and more structured than restaurant receipts. The grounding problem identified here gets worse. LoRA on LM attention layers is the minimum required change for production accuracy.
 

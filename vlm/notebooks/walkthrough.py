@@ -184,8 +184,8 @@ def _(load_model_btn, mo):
         device=device,
         vision_model_name="naver-clova-ix/donut-base-finetuned-cord-v2",
         default_vision_processor=False,
-        image_height=640,
-        image_width=960,
+        image_height=960,
+        image_width=640,
         lm_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         cross_attention_projector=False,
         projector_mult=2,
@@ -877,7 +877,7 @@ def _(mo):
     wrong inductive bias for dense receipt text. Picked Donut for its CORD
     fine-tune; dropped the BART decoder, kept only the encoder.
 
-    Image processor's resize is overridden to 640×960 — default Donut targets
+    Image processor's resize is overridden to 960×640 — default Donut targets
     ~2560×1920 and produces ~4800 visual tokens, blowing past TinyLlama's
     context window.
     """)
