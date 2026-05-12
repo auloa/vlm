@@ -64,9 +64,9 @@ training_runs/base/
 ### Sanity check
 
 ```bash
-python -m vlm.scripts.train_sft -c debug
-python -m vlm.scripts.train_rl  -c debug
-python -m vlm.scripts.evaluate  -c debug
+uv run python -m vlm.scripts.train_sft -c debug
+uv run python -m vlm.scripts.train_rl  -c debug
+uv run python -m vlm.scripts.evaluate  -c debug
 ```
 
 Runs the full pipeline on 20 samples in a few minutes.
@@ -80,11 +80,9 @@ tensorboard --logdir training_runs/base/runs
 ### Interactive walkthrough
 
 ```bash
-marimo run walkthrough.py   # read-only app mode
-marimo edit walkthrough.py  # editable notebook mode
+uv run marimo run walkthrough.py   # read-only app mode
+uv run marimo edit walkthrough.py  # editable notebook mode (play around with code and re-run cells)
 ```
-
-Requires: `uv add marimo altair pandas tensorboard datasets pillow`
 
 ---
 
@@ -344,11 +342,11 @@ EMA reward climbed rapidly and stabilised. Tight KL (0.20) prevented the policy 
 
 ## Design Decisions
 
-**Donut over CLIP/SigLIP.** Donut's encoder is pretrained on document images with a text-decoding objective. CLIP/SigLIP encode for object semantics — the wrong inductive bias for dense receipt text.
+**Donut over CLIP/SigLIP:** Donut's encoder is pretrained on document images with a text-decoding objective. So it was picked over other vision encoders that lack this grounding prior.
 
 **Aspect ratio: portrait (960×640).** The initial config had `image_height=640, image_width=960` — landscape. CORD receipts are portrait (height > width). The processor squished every receipt horizontally by ~2.25×, degrading Donut's visual features significantly. Swapping to `height=960, width=640` was the single largest performance improvement in the project: SFT total match 30% → 62%, value accuracy 50% → 75.5%.
 
-**LayerNorm at the projector output.** Added after early runs where the LM produced image-independent outputs. Pre-norm projector outputs sat at magnitudes the frozen LM attention didn't react to.
+**LayerNorm at the projector output.** Added to normalize the visual token magnitudes into a range the frozen LM attention responds to.
 
 **CORD-native schema (verbatim keys).** Every visible field on the receipt maps to a target token. Renaming or dropping fields trains the model to suppress visible content, weakening grounding.
 
@@ -356,8 +354,7 @@ EMA reward climbed rapidly and stabilised. Tight KL (0.20) prevented the policy 
 
 **Text hallucination penalty.** For text fields where both pred and GT have values, penalty = `-0.03 × (1 - token_overlap)`. Starts negative, erodes to zero at full overlap. Pushes the model to use visual signal rather than sampling from its prior.
 
-**Batch size 4 (no gradient accumulation).** With ~720 training samples, smaller batches do ~4× more optimizer steps per epoch.
-
+**Batch size 4 (no gradient accumulation).** With ~720 training samples, smaller batches do ~4× more optimizer steps per epoch, also stable training despite smaller batch size. Tried batch 4 with grad accumulation 4, but it was slower and no better.
 
 **GRPO with PPO clipping, `ppo_epochs=1`.** Clipped PPO surrogate implemented with snapshotted old log-probs. At `ppo_epochs=1` clipping is a no-op — tried `ppo_epochs=4`, no improvement.
 
