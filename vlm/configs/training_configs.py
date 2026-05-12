@@ -191,13 +191,16 @@ def no_g_accum_long(name: str) -> TrainingConfig:
 
 
 @register_config
-def tight(name: str) -> TrainingConfig:
-    """
-Tighter RL: higher KL coefficient + lower LR.
+def no_g_accum_long_rep(name: str) -> TrainingConfig:
+    """More SFT epochs (25) with dropout.
+
+    The CORD-native schema has not converged at 15 epochs with dropout —
+    val loss is still declining. This config gives the model more time.
     """
     cfg = _base_receipt_config(name)
-    cfg.rl.kl_coef = 0.20
-    cfg.rl.learning_rate = 1e-6
+    cfg.sft.batch_size = 4
+    cfg.sft.epochs = 25
+    cfg.sft.grad_accum_steps = 1
     return cfg
 
 
