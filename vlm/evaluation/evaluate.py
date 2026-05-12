@@ -245,6 +245,7 @@ def _load_model_with_projector(
         cross_attention_projector_num_layers=cfg.projector.num_layers,
         cross_attention_projector_ffn_mult=cfg.projector.ffn_mult,
         projector_mult=cfg.projector.projector_mult,
+        projector_dropout=cfg.projector.dropout
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

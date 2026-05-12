@@ -12,7 +12,7 @@ def parse_args() -> argparse.Namespace:
         "--config",
         "-c",
         type=str,
-        default="receipt_base",
+        default="base",
         choices=sorted(TRAINING_CONFIGS),
         help="Run config name.",
     )
@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage",
         type=str,
-        default="both",
+        default="sft",
         choices=["sft", "rl", "both", "custom"],
         help="Which checkpoint to evaluate.",
     )
