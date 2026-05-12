@@ -72,17 +72,17 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
     ref_projector = clone_reference_projector(model.projector)
 
     print("loading dataset...")
-
+    tokenizer = prepare_tokenizer(model.lm.tokenizer)
+    instruction = build_instruction(tokenizer, model_cfg.instruction)
     dataset = CORDDataset(
         split=data.train_split,
         max_samples=data.train_samples,
         dataset_name=data.dataset_name,
+        tokenizer=tokenizer,
+        max_target_length=rl.max_completion_tokens,
     )
 
     print(f"dataset ready: {len(dataset)} samples")
-
-    tokenizer = prepare_tokenizer(model.lm.tokenizer)
-    instruction = build_instruction(tokenizer, model_cfg.instruction)
 
     loader = DataLoader(
         dataset,
