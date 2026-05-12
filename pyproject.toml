@@ -20,15 +20,15 @@ dependencies = [
     "altair>=6.1.0",
     "pandas>=3.0.2",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
+#
+#[tool.uv.sources]
+#torch = { index = "pytorch-cu126" }
+#torchvision = { index = "pytorch-cu126" }
+#
+#[[tool.uv.index]]
+#name = "pytorch-cu126"
+#url = "https://download.pytorch.org/whl/cu126"
+#explicit = true
 
 [project.optional-dependencies]
 dev = [
