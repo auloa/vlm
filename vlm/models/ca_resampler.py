@@ -47,7 +47,7 @@ class CrossAttentionBlock(nn.Module):
         return queries
 
 
-class PerceiverResampler(nn.Module):
+class EmbeddingsResampler(nn.Module):
     """Compresses N visual tokens into num_queries tokens via cross-attention.
 
     Output is (batch, num_queries, llm_dim), which can be directly fed into the LLM as prefix tokens.

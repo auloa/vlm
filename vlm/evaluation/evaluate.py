@@ -24,12 +24,6 @@ from vlm.utils.json_extractor import extract_json_object
 from vlm.utils.training import set_seed
 
 
-# Format adherence in this schema means:
-#   - parseable strict JSON
-#   - has top-level `menu` (list, non-empty) — the "line_items" of the assignment
-#   - has top-level `total` (dict) with `total_price` set
-# This is the direct translation of the assignment's "line_items, total" check
-# into CORD's native nomenclature.
 REQUIRED_TOP_KEYS = {"menu", "total"}
 
 

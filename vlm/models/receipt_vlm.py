@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from vlm.models.language_model import CausalLM
-from vlm.models.resampler import PerceiverResampler
+from vlm.models.ca_resampler import EmbeddingsResampler
 from vlm.models.projector import Projector
 from vlm.models.vision_encoder import DonutVisionEncoder
 
@@ -50,7 +50,7 @@ class ReceiptVLM(nn.Module):
         )
 
         if cross_attention_projector:
-            self.projector = PerceiverResampler(
+            self.projector = EmbeddingsResampler(
                 vis_dim=self.vision_encoder.hidden_size,
                 llm_dim=self.lm.hidden_size,
                 num_queries=cross_attention_projector_num_queries,

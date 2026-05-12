@@ -25,7 +25,7 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     """Base receipt-extraction configuration.
 
     Reflects best-known settings from ablations:
-    - Batch 4, no gradient accumulation (more optimizer steps per epoch)
+    - Batch 4,  gradient accumulation step of 4 (affective batch size 16)
     - Dropout 0.15 in projector (prevents late-epoch overfitting)
     - max_target_length 256 (fits CORD-native schema at ~90% sample retention)
 
@@ -177,14 +177,16 @@ def no_g_accum_ndrop(name: str) -> TrainingConfig:
     return cfg
 
 @register_config
-def long(name: str) -> TrainingConfig:
+def no_g_accum_long(name: str) -> TrainingConfig:
     """More SFT epochs (25) with dropout.
 
     The CORD-native schema has not converged at 15 epochs with dropout —
     val loss is still declining. This config gives the model more time.
     """
     cfg = _base_receipt_config(name)
+    cfg.sft.batch_size = 4
     cfg.sft.epochs = 25
+    cfg.sft.grad_accum_steps = 1
     return cfg
 
 

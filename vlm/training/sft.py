@@ -247,7 +247,7 @@ def train_sft(cfg: TrainingConfig, resume: bool = False) -> None:
                     "train": train_loss,
                     "val": val_loss,
                 },
-                epoch + 1,
+                global_step,
             )
 
             epoch_msg = (
