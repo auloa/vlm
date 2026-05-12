@@ -241,13 +241,15 @@ def train_sft(cfg: TrainingConfig, resume: bool = False) -> None:
             train_loss = epoch_loss / max(1, valid_batches)
             val_loss = _validate(model, val_loader)
 
+            tb_epoch = epoch + 1
+
             writer.add_scalars(
                 "sft/epoch_loss",
                 {
                     "train": train_loss,
                     "val": val_loss,
                 },
-                global_step,
+                tb_epoch,
             )
 
             epoch_msg = (
@@ -255,7 +257,7 @@ def train_sft(cfg: TrainingConfig, resume: bool = False) -> None:
                 f"train loss {train_loss:.4f} | "
                 f"val loss {val_loss:.4f}"
             )
-            log_text(writer, "sft/log", epoch_msg, step=global_step)
+            log_text(writer, "sft/log", epoch_msg, step=tb_epoch)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -289,7 +291,7 @@ def train_sft(cfg: TrainingConfig, resume: bool = False) -> None:
                         f"checkpoint saved: {cfg.sft_best_checkpoint} "
                         f"(val loss {val_loss:.4f})"
                     ),
-                    step=global_step,
+                    step=tb_epoch,
                 )
 
     print("SFT training complete")
