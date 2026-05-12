@@ -20,7 +20,7 @@ from vlm.utils.device import get_device
 from vlm.utils.training import get_autocast, set_seed
 
 
-def train_sft(cfg: TrainingConfig) -> None:
+def train_sft(cfg: TrainingConfig, resume: bool = False) -> None:
     data = cfg.data
     vision = cfg.vision
     model_cfg = cfg.model
@@ -49,7 +49,7 @@ def train_sft(cfg: TrainingConfig) -> None:
         cross_attention_projector_num_layers=projector_cfg.num_layers,
         cross_attention_projector_ffn_mult=projector_cfg.ffn_mult,
         projector_mult=projector_cfg.projector_mult,
-        projector_dropout=projector_cfg.dropout
+        projector_dropout=projector_cfg.dropout,
     )
 
     tokenizer = prepare_tokenizer(model.lm.tokenizer)
@@ -117,11 +117,36 @@ def train_sft(cfg: TrainingConfig) -> None:
 
     global_step = 0
     best_val_loss = float("inf")
+    start_epoch = 0
+
+    # ── Resume ──────────────────────────────────────────────────────────
+    if resume:
+        resume_ckpt = _find_latest_epoch_checkpoint(checkpoint_dir)
+        if resume_ckpt is None:
+            print("[resume] no epoch checkpoint found — starting from scratch")
+        else:
+            print(f"[resume] loading {resume_ckpt}")
+            ckpt = torch.load(resume_ckpt, map_location=device)
+            model.projector.load_state_dict(ckpt["projector_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            global_step = ckpt["step"]
+            best_val_loss = ckpt.get("val_loss", float("inf"))
+            print(
+                f"[resume] epoch {start_epoch}/{sft.epochs} | "
+                f"step {global_step} | best val loss {best_val_loss:.4f}"
+            )
+            if start_epoch >= sft.epochs:
+                print("[resume] training already complete for this config")
+                return
+    # ────────────────────────────────────────────────────────────────────
 
     with SummaryWriter(log_dir=str(cfg.sft_run_dir)) as writer:
         log_text(writer, "sft/log", f"device: {device}", step=0)
 
-        for epoch in range(sft.epochs):
+        for epoch in range(start_epoch, sft.epochs):
             model.projector.train()
             model.vision_encoder.eval()
             model.lm.model.eval()
@@ -240,6 +265,7 @@ def train_sft(cfg: TrainingConfig) -> None:
                 _save_checkpoint(
                     model=model,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     epoch=epoch,
                     step=global_step,
                     val_loss=val_loss,
@@ -249,6 +275,7 @@ def train_sft(cfg: TrainingConfig) -> None:
                 _save_checkpoint(
                     model=model,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     epoch=epoch,
                     step=global_step,
                     val_loss=val_loss,
@@ -336,7 +363,6 @@ def _log_sample(
             attention_mask=attention_mask,
         )
 
-        # For inputs_embeds, max_length is total prefix length + new tokens.
         generated = model.lm.model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
@@ -353,8 +379,6 @@ def _log_sample(
     )
 
     # Recover the ground-truth target string from labels.
-    # Labels have -100 over the instruction prefix and padding; the remaining
-    # positions are the target JSON token ids.
     label_ids = batch.labels[0]
     target_ids = label_ids[label_ids != -100]
     ground_truth = tokenizer.decode(target_ids, skip_special_tokens=True)
@@ -377,6 +401,7 @@ def _log_sample(
 def _save_checkpoint(
     model,
     optimizer,
+    scheduler,
     epoch: int,
     step: int,
     val_loss: float,
@@ -392,6 +417,13 @@ def _save_checkpoint(
             "val_loss": val_loss,
             "projector_state_dict": model.projector.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
         },
         checkpoint_path,
     )
+
+
+def _find_latest_epoch_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Return the epoch checkpoint with the highest epoch number, or None."""
+    candidates = sorted(checkpoint_dir.glob("epoch_*.pt"))
+    return candidates[-1] if candidates else None

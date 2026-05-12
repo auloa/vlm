@@ -25,7 +25,7 @@ from vlm.utils.device import get_device
 from vlm.utils.training import get_autocast, set_seed
 
 
-def train_rl(cfg: TrainingConfig) -> None:
+def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
     data = cfg.data
     vision = cfg.vision
     model_cfg = cfg.model
@@ -58,10 +58,10 @@ def train_rl(cfg: TrainingConfig) -> None:
         cross_attention_projector_num_layers=projector_cfg.num_layers,
         cross_attention_projector_ffn_mult=projector_cfg.ffn_mult,
         projector_mult=projector_cfg.projector_mult,
-        projector_dropout=projector_cfg.dropout
-
+        projector_dropout=projector_cfg.dropout,
     )
 
+    # Always start from SFT best checkpoint as the base weights.
     ckpt = torch.load(cfg.sft_best_checkpoint, map_location=device)
     model.projector.load_state_dict(ckpt["projector_state_dict"])
     print(f"loaded SFT checkpoint: {cfg.sft_best_checkpoint}")
@@ -103,6 +103,27 @@ def train_rl(cfg: TrainingConfig) -> None:
     best_ema_for_stopping = -float("inf")
     steps_since_improvement = 0
     stop_training = False
+
+    # ── Resume ──────────────────────────────────────────────────────────
+    if resume:
+        rl_ckpt_path = Path(cfg.rl_best_checkpoint)
+        if not rl_ckpt_path.exists():
+            print("[resume] no RL checkpoint found — starting from SFT checkpoint")
+        else:
+            print(f"[resume] loading {rl_ckpt_path}")
+            rl_ckpt = torch.load(rl_ckpt_path, map_location=device)
+            # Overwrite projector weights with the RL checkpoint
+            # (SFT weights loaded above are replaced here).
+            model.projector.load_state_dict(rl_ckpt["projector_state_dict"])
+            optimizer.load_state_dict(rl_ckpt["optimizer_state_dict"])
+            global_step = rl_ckpt.get("step", 0)
+            best_ema_reward = rl_ckpt.get("mean_reward", -float("inf"))
+            best_ema_for_stopping = best_ema_reward
+            print(
+                f"[resume] step {global_step} | "
+                f"best ema reward {best_ema_reward:.4f}"
+            )
+    # ────────────────────────────────────────────────────────────────────
 
     with SummaryWriter(log_dir=str(cfg.rl_run_dir)) as writer:
         log_text(writer, "rl/log", f"device: {device}", step=0)
@@ -455,7 +476,6 @@ def _log_metrics(
 
     if skipped:
         writer.add_scalar("rl/update/skipped", 1.0, global_step)
-
         print(
             f"step {global_step:4d} | "
             f"batch {step + 1}/{total_steps} | "
@@ -485,6 +505,7 @@ def _log_metrics(
         f"loss {loss.item():.4f}"
     )
 
+
 def _log_sample(
     gen: GenerationOutput,
     rewards: torch.Tensor,
@@ -495,7 +516,7 @@ def _log_sample(
     best_idx = rewards.argmax().item()
     worst_idx = rewards.argmin().item()
 
-    log_text = (
+    log_text_str = (
         f"**ground truth:** {ground_truth[:300]}\n\n"
         f"**best reward={rewards[best_idx]:.3f}:**\n"
         f"{gen.texts[best_idx][:500]}\n\n"
@@ -503,7 +524,7 @@ def _log_sample(
         f"{gen.texts[worst_idx][:500]}"
     )
 
-    writer.add_text("rl/samples", log_text, global_step)
+    writer.add_text("rl/samples", log_text_str, global_step)
 
     print(
         f"\nbest @ step {global_step} (reward={rewards[best_idx]:.3f}):\n"

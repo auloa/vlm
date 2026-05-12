@@ -15,6 +15,17 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(TRAINING_CONFIGS),
         help="Run config name.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Resume from the latest epoch checkpoint for this config. "
+            "Restores projector weights, optimizer state, and scheduler state. "
+            "If no checkpoint exists, starts from scratch."
+        ),
+    )
+
 
     return parser.parse_args()
 
@@ -24,7 +35,7 @@ def main() -> None:
     cfg = get_training_config(args.config)
 
     print(f"running SFT configuration: {cfg.name}")
-    train_sft(cfg)
+    train_sft(cfg, args.resume)
 
 
 if __name__ == "__main__":
