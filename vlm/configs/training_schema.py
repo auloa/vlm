@@ -19,8 +19,8 @@ class DataConfig:
 class VisionConfig:
     model_name: str = "naver-clova-ix/donut-base-finetuned-cord-v2"
     default_processor: bool = False
-    image_height: int = 640
-    image_width: int = 960
+    image_height: int = 960
+    image_width: int = 640
 
 @dataclass
 class LMConfig:

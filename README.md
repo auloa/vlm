@@ -117,21 +117,20 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 
 **Key config fields:**
 
-| Section | Field                   | Default | What it controls                         |
-|---|-------------------------|---------|------------------------------------------|
-| `sft` | `epochs`                | 15      | SFT training epochs                      |
-| `sft` | `batch_size`            | 4       | Batch size (no accumulation)             |
-| `sft` | `grad_accum_steps`       | 1       | Effective batch size                     |
-| `sft` | `learning_rate`         | 5e-5    | AdamW LR for SFT                         |
-| `sft` | `max_target_length`     | 256     | Max target tokens; longer samples dropped |
-| `rl` | `completions_per_image` | 4       | K for group-relative advantages (≥ 2)    |
-| `rl` | `learning_rate`         | 5e-6    | AdamW LR for RL                          |
-| `rl` | `kl_coef`               | 0.02    | KL penalty weight against SFT reference  |
-| `rl` | `temperature`           | 0.7     | Sampling temperature for RL rollouts     |
-| `vision` | `image_height/width`    | 640×960 | Resize target for Donut processor        |
-| `projector` | `cross_attention`       | False   | Use resampler instead of MLP             |
-| `projector` | `dropout`               | 0.15    | Dropout rate in projector                |
-| `eval` | `num_samples`           | 50      | Test samples for evaluation              |
+| Section | Field | Default | What it controls |
+|---|---|---|---|
+| `sft` | `epochs` | 15 | SFT training epochs |
+| `sft` | `batch_size` | 4 | Batch size (no accumulation) |
+| `sft` | `learning_rate` | 5e-5 | AdamW LR for SFT |
+| `sft` | `max_target_length` | 256 | Max target tokens; longer samples dropped |
+| `rl` | `completions_per_image` | 4 | K for group-relative advantages (≥ 2) |
+| `rl` | `learning_rate` | 5e-6 | AdamW LR for RL |
+| `rl` | `kl_coef` | 0.02 | KL penalty weight against SFT reference |
+| `rl` | `temperature` | 0.7 | Sampling temperature for RL rollouts |
+| `vision` | `image_height/width` | 640×960 | Resize target for Donut processor |
+| `projector` | `cross_attention` | False | Use resampler instead of MLP |
+| `projector` | `dropout` | 0.15 | Dropout rate in projector |
+| `eval` | `num_samples` | 50 | Test samples for evaluation |
 
 Full dataclass definitions in `vlm/configs/training_schema.py`.
 
@@ -254,10 +253,9 @@ Cross-entropy over the target JSON tokens. Visual prefix and instruction masked 
 
 Best val-loss checkpoint saved per epoch for resume support.
 
-
 ### RL
 
-Starts from the SFT best checkpoint (lowest validation loss in this case not based on reward computation).
+Starts from the SFT best checkpoint.
 
 1. Sample K=4 completions from the current policy
 2. Score each with the reward function
@@ -287,7 +285,7 @@ Four components, total clipped to [0, 1]:
 **Content grading** walks the GT recursively. For each leaf key, the model is scored by tolerant numeric match (money fields) or token overlap (text fields). Score = `coverage × value_accuracy`.
 
 **Hallucination penalty** has two parts:
-- *Structural:* extra keys in pred not in GT (-0.04 per key, cap -0.20), duplicate item names, excessive menu length, leaked role tokens
+- *Structural:* extra keys in pred not in GT (-0.02 per key, cap -0.20), duplicate item names, excessive menu length, leaked role tokens
 - *Text value:* for text fields present in both pred and GT, `penalty = -0.03 × (1 - token_overlap)` — starts negative, erodes to 0 at full overlap. Capped at -0.15 total. Numeric fields are not penalised here — those are handled by the content score.
 
 Both are dynamic — only keys present in that sample's GT are scored.
@@ -314,43 +312,48 @@ Full per-sample outputs in `results/eval_{stage}/samples.{jsonl,md}`.
 
 ## Results
 
-Full results in `results/eval_comparison.json` and the interactive walkthrough (`marimo run walkthrough.py`).
+Final evaluation on 50 held-out test images. Config: `no_g_accum_long` (SFT 22 epochs, no dropout, batch 4, no gradient accumulation).
+
+| Metric | SFT | RL | Notes |
+|---|---|---|---|
+| format_adherence_rate | 98% | **100%** | RL fixed the remaining 2% |
+| mean_full_structure_score | 94.3% | **97.1%** | RL produced more complete sections |
+| total_match_rate | **30%** | 26% | Slight regression |
+| mean_key_coverage | 78.1% | **84.4%** | RL found more GT fields |
+| mean_value_accuracy | **50.1%** | 46.4% | More fields, slightly less accurate |
+| mean_extra_keys | **1.30** | 1.76 | RL added hallucinated keys |
+| mean_reward | **0.692** | 0.688 | Essentially unchanged |
+
+RL improved structural completeness — format adherence went to 100%, full structure score to 97.1%, key coverage gained 6.3 percentage points. The trade-off: the policy learned to produce more fields at the cost of slightly lower per-value accuracy and more hallucinated keys (1.30 → 1.76). Mean reward is nearly identical, meaning the reward function saw the extra keys as a roughly equal exchange for the coverage gain. The hallucination penalty (-0.02 per extra key) wasn't strong enough to fully suppress the growth in extra keys.
+
+The best-EMA checkpoint was captured at step ~180 (EMA 0.751) before a dip around step 300 caused by a cluster of hard multi-item receipts. The policy recovered but the checkpoint logic correctly preserved the earlier peak.
+
+Full per-sample outputs: `results/eval_comparison.json`, `results/eval_sft/samples.{jsonl,md}`, `results/eval_rl/samples.{jsonl,md}`.
 
 ### SFT training behavior
 
-![SFT training loss](assets/sft_loss.png)
+![SFT run comparison](assets/sft_comparison.png)
 
-No-dropout (blue/green): val bottoms at ~0.47 around epoch 9, then climbs — overfitting. Dropout (pink/orange): val still declining at epoch 15 — slower convergence but no overfitting.
-
-**Key finding:** earlier runs showed only 4% and 24% SFT format adherence. This was caused by an evaluation bug — `build_instruction` (which wraps the prompt with the chat template) was not called during evaluation, so the model saw a different prompt at eval time than it was trained on. With the fix applied, the `nodrop` config reaches **98% format adherence** in 15 epochs.
+`no_g_accum_long` (selected config): val bottoms at ~0.41 around epoch 13-14, stays flat through epoch 25. Lowest val minimum of all runs, cleanest curve. See Design Decisions for full run comparison.
 
 ### RL training behavior
 
 ![RL reward EMA](assets/rl_reward_ema.png)
 ![RL reward components](assets/rl_reward_components.png)
 
-EMA reward peaks early (~step 100), then plateaus. Format and schema components stay near their maximums throughout — RL maintains what SFT built. Content component carries the actual RL signal. Best-EMA checkpoint captures the early peak.
+EMA reward climbs rapidly in the first 50 steps (0.05 → 0.75), peaks around step 180 (EMA 0.751), dips sharply to ~0.55 around step 300 (cluster of hard multi-item receipts), then partially recovers to 0.63. Best-EMA checkpoint captured at step ~180.
 
-### Eval results
+Format component stays at 0.30 (max) throughout — RL never breaks what SFT built. Parseable JSON rate is flat at 1.0 for the entire run. Content component is noisy but active. KL stays controlled (0.1–0.6) with one anomalous spike at step 130 (kl 3307, loss 66) that recovered immediately.
 
-_Pending final RL run. Will be updated._
-
-| Metric | SFT | RL |
-|---|---|---|
-| format_adherence_rate | — | — |
-| full_structure_rate | — | — |
-| total_match_rate | — | — |
-| mean_key_coverage | — | — |
-| mean_value_accuracy | — | — |
-| mean_reward | — | — |
+The run includes multiple near-perfect and exact-match predictions, confirming the model is reading visual content rather than sampling from prior. Step 80: perfect `Gado-Gado` prediction including all sub_total and total fields. Step 400: exact `Cheese Tart` match including changeprice.
 
 ## Design Decisions
 
-**Donut over CLIP/SigLIP.** Donut's encoder is pretrained on document images with a text-decoding objective.
+**Donut over CLIP/SigLIP.** Donut's encoder is pretrained on document images with a text-decoding objective. CLIP/SigLIP encode for object semantics — the wrong inductive bias for dense receipt text.
 
-**LayerNorm at the projector output.** It is added so that the component-wise magnitudes of the visual tokens sit in a range the frozen LM attention layers react to.
+**LayerNorm at the projector output.** Added after early runs where the LM produced image-independent outputs. Pre-norm projector outputs sat at magnitudes the frozen LM attention didn't react to.
 
-**CORD-native schema (verbatim keys).** Every visible field on the receipt maps to a target token. This is done to preserve the visual grounding signal across all section of the image.
+**CORD-native schema (verbatim keys).** Every visible field on the receipt maps to a target token. Renaming or dropping fields trains the model to suppress visible content, weakening grounding.
 
 **Dynamic reward grading.** The content reward scores only keys present in that sample's GT. Schema-agnostic: adding fields to the parser automatically changes what gets scored.
 
@@ -358,11 +361,29 @@ _Pending final RL run. Will be updated._
 
 **Batch size 4 (no gradient accumulation).** With ~720 training samples, smaller batches do ~4× more optimizer steps per epoch. No-dropout batch-4 reaches 98% format adherence in 15 epochs; larger effective batch sizes don't converge within the same epoch budget.
 
+**SFT config selection for RL.** Five configs were evaluated before choosing the RL starting point:
+
+![SFT run comparison](assets/sft_comparison.png)
+
+| Config | Val loss | Total match | Value acc | Extra keys | Shape |
+|---|---|---|---|---|---|
+| `base` | 0.624 | 2% | 18.8% | 1.62 | flat, undertrained |
+| `nodrop` | 0.615 | 2% | 22.6% | 1.68 | flat from epoch 8, format only |
+| `no_g_accum` | 0.475 | 26% | 41.9% | 1.58 | still declining at epoch 15 |
+| `no_g_accum_ndrop` | 0.489 | 42% | 53.2% | 1.78 | rises after epoch 9, wide gap |
+| `no_g_accum_long` | **0.441** | 30% | 50.1% | **1.30** | lowest val, flat, fewest hallucinations |
+
+`no_g_accum_long` selected: lowest val minimum, cleanest curve (flat rather than rising at epoch 13-14), fewest extra keys. `no_g_accum_ndrop` had higher content scores but its wide train/val gap (0.083 train vs 0.489 val) indicates a sharp minimum that destabilised under RL in previous runs.
+
 **Dropout in the projector.** No-dropout reaches a sharp SFT minimum — good for SFT metrics but RL destabilized it across multiple runs. Dropout (p=0.15) produces a flatter minimum that RL can refine without collapsing format adherence.
 
 **Resume support.** Both SFT and RL support `--resume`. SFT saves optimizer and scheduler state per epoch checkpoint; RL saves optimizer state in the best-EMA checkpoint.
 
-**GRPO with PPO clipping, `ppo_epochs=1`.** Clipped PPO surrogate implemented with snapshotted old log-probs. At `ppo_epochs=1` clipping is a no-op — tried `ppo_epochs=4`, no improvement.
+**GRPO with PPO clipping, `ppo_epochs=1`.** Clipped PPO surrogate implemented with snapshotted old log-probs. At `ppo_epochs=1` clipping is a no-op — tried `ppo_epochs=4`, no improvement. The policy moves too little per step at this LR for clipping to change anything.
+
+**Step-based EMA-reward checkpointing.** EMA peaked at step ~180 (0.751), dipped at step ~300 due to a cluster of hard multi-item receipts, partially recovered. Best-checkpoint logic captured the step-180 peak. Without it, the step-300 dip would have ended the run at a worse state.
+
+**KL spike handling.** One anomalous KL spike at step 130 (kl=3307, loss=66) caused by a single sample with extreme log-prob ratios. Grad clipping at 0.5 contained the gradient update; the policy recovered to normal by step 140. No checkpoint was overwritten during the spike since EMA didn't improve.
 
 ### Alternatives explored
 
@@ -388,11 +409,13 @@ _Pending final RL run. Will be updated._
 
 **Multi-page documents.** Donut at 640×960 isn't sufficient for dense forms. Context limits become a bottleneck at a few pages. Higher resolution, page tiling, or per-page encoding with merged extraction needed for bill of lading scale.
 
-**Visual grounding.** Bills of lading have more structured layout than restaurant receipts. The grounding problem identified here gets worse. LoRA on LM attention layers is the minimum required change for production accuracy.
+**Visual grounding.** Bills of lading are denser and more structured than restaurant receipts. The grounding problem identified here gets worse. LoRA on LM attention layers is the minimum required change for production accuracy.
 
-**Layout-aware encoder.** For complex Bill with multi-column tables fine-tuning a layout-aware encoder like Qwen-VL or LayoutLMv3 would likely be necessary to capture the spatial relationships between fields.
+**Layout-aware encoder.** For complex BoL with multi-column tables, swap Donut for LayoutLMv3 or DocFormerV2 — they encode bounding boxes, OCR text, and image jointly, which matters when document structure carries semantic meaning.
 
 **Larger models.** TinyLlama at 1.1B is the main capacity constraint. A 7B+ instruction-tuned LM with LoRA adapters and the same projector architecture would likely close most of the grounding gap.
+
+**Schema flexibility.** BoL schemas vary by carrier and shipper. The CORD-native schema approach generalizes — include the target schema in the prompt at inference time and train the model to extract whatever schema it's shown.
 
 ## Project Structure
 
@@ -420,8 +443,6 @@ vlm/
 │   └── sft.py
 ├── evaluation/
 │   └── evaluate.py             # format adherence, full structure rate, key coverage
-├── notebooks/
-│   └── walkthrough.py          # interactive Marimo walkthrough of the full pipeline
 ├── utils/
 │   ├── device.py
 │   ├── hf_login.py

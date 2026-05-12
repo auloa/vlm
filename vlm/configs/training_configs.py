@@ -45,8 +45,8 @@ def _base_receipt_config(name: str) -> TrainingConfig:
     # Vision encoder
     cfg.vision.model_name = "naver-clova-ix/donut-base-finetuned-cord-v2"
     cfg.vision.default_processor = False
-    cfg.vision.image_height = 640
-    cfg.vision.image_width = 960
+    cfg.vision.image_height = 960
+    cfg.vision.image_width = 640
 
     # Language model
     cfg.model.lm_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
