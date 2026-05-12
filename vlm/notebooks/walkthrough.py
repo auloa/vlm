@@ -672,7 +672,12 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 6. Eval results
+    ## 6. Results
+
+    Summary metrics and per-sample comparison. Export with:
+    ```bash
+    marimo export html walkthrough.py -o results.html
+    ```
     """)
     return
 
@@ -693,50 +698,51 @@ def _(json, mo, results_dir):
             comparison_msg = mo.md(f"`{comparison_path}` not found — run `evaluate.py`.")
 
     comparison_msg
-    return (comparison,)
+    return comparison, comparison_path, comparison_msg
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(comparison, mo, pd):
     if comparison is None:
-        eval_df = None
-        out__ = mo.md("_no eval data_")
+        eval_table = mo.md("_no eval data_")
     else:
-        sft_metrics = comparison.get("sft", {})
-        rl_metrics = comparison.get("rl", {})
-        metrics = [
-            "format_adherence_rate",
-            "strict_json_rate",
-            "extractable_json_rate",
-            "required_keys_rate",
-            "total_present_rate",
-            "total_match_rate",
-            "mean_reward",
+        sft_m = comparison.get("sft", {})
+        rl_m = comparison.get("rl", {})
+        metric_rows = [
+            ("format_adherence_rate", "Format adherence", True),
+            ("mean_full_structure_score", "Full structure score", True),
+            ("strict_json_rate", "Strict JSON", True),
+            ("total_match_rate", "Total match", True),
+            ("mean_key_coverage", "Key coverage", True),
+            ("mean_value_accuracy", "Value accuracy", True),
+            ("mean_extra_keys", "Extra keys (hallucinated)", False),
+            ("mean_reward", "Mean reward", False),
         ]
-        rows = []
-        for m in metrics:
-            s = sft_metrics.get(m)
-            r = rl_metrics.get(m)
+        table_rows = []
+        for key, label, is_pct in metric_rows:
+            s = sft_m.get(key)
+            r = rl_m.get(key)
             delta = (r - s) if (s is not None and r is not None) else None
-            rows.append({"metric": m, "sft": s, "rl": r, "delta": delta})
-        eval_df = pd.DataFrame(rows)
-        out__ = eval_df
-    out__
-    return
+            fmt = lambda v: f"{v:.1%}" if is_pct and v is not None else (f"{v:.3f}" if v is not None else "—")
+            table_rows.append({
+                "metric": label,
+                "sft": fmt(s),
+                "rl": fmt(r),
+                "delta": (f"{delta:+.1%}" if is_pct else f"{delta:+.3f}") if delta is not None else "—",
+            })
+        eval_table = pd.DataFrame(table_rows)
+
+    eval_table
+    return comparison_msg, eval_table, metric_rows, rl_m, sft_m, table_rows
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("""
-    ## 7. Per-sample inspector
-
-    Each sample shows ground truth, SFT prediction, and RL prediction side
-    by side, with format / total-match flags.
-    """)
+    mo.md("### Per-sample delta: SFT → RL")
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(json, results_dir):
     def _load_jsonl(path):
         if not path.exists():
@@ -750,14 +756,63 @@ def _(json, results_dir):
     else:
         sft_samples = _load_jsonl(results_dir / "eval_sft" / "samples.jsonl")
         rl_samples = _load_jsonl(results_dir / "eval_rl" / "samples.jsonl")
-    return rl_samples, sft_samples
+    return _load_jsonl, rl_samples, sft_samples
 
 
-@app.cell
+@app.cell(hide_code=True)
+def _(mo, pd, rl_samples, sft_samples):
+    if not sft_samples or not rl_samples:
+        delta_table = mo.md("_need both SFT and RL samples_")
+    else:
+        _n = min(len(sft_samples), len(rl_samples))
+        _improved = _regressed = _unchanged = 0
+        _tm_gained = _tm_lost = 0
+        _fs_gained = _fs_lost = 0
+        for _i in range(_n):
+            _sr = sft_samples[_i].get("reward", 0) or 0
+            _rr = rl_samples[_i].get("reward", 0) or 0
+            _stm = sft_samples[_i].get("total_match", False)
+            _rtm = rl_samples[_i].get("total_match", False)
+            _sfs = sft_samples[_i].get("full_structure_score", 0.0)
+            _rfs = rl_samples[_i].get("full_structure_score", 0.0)
+            if _rr > _sr + 1e-6:
+                _improved += 1
+            elif _rr < _sr - 1e-6:
+                _regressed += 1
+            else:
+                _unchanged += 1
+            if not _stm and _rtm:
+                _tm_gained += 1
+            elif _stm and not _rtm:
+                _tm_lost += 1
+            if _rfs > _sfs + 0.05:
+                _fs_gained += 1
+            elif _sfs > _rfs + 0.05:
+                _fs_lost += 1
+        delta_table = pd.DataFrame([
+            {"category": "RL reward > SFT", "count": _improved},
+            {"category": "RL reward < SFT", "count": _regressed},
+            {"category": "RL reward == SFT", "count": _unchanged},
+            {"category": "Gained total_match", "count": _tm_gained},
+            {"category": "Lost total_match", "count": _tm_lost},
+            {"category": "Gained full_structure (>5%)", "count": _fs_gained},
+            {"category": "Lost full_structure (>5%)", "count": _fs_lost},
+        ])
+    delta_table
+    return delta_table, rl_samples, sft_samples
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("## 7. Per-sample inspector")
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo, sft_samples):
     if not sft_samples:
         sample_picker = None
-        msg = mo.md("_no samples — run evaluate.py_")
+        _msg = mo.md("_no samples — run evaluate.py_")
     else:
         sample_picker = mo.ui.slider(
             start=0,
@@ -765,9 +820,8 @@ def _(mo, sft_samples):
             value=0,
             label="sample index",
         )
-        msg = sample_picker
-    msg
-
+        _msg = sample_picker
+    _msg
     return (sample_picker,)
 
 
@@ -776,69 +830,30 @@ def _(mo, rl_samples, sample_picker, sft_samples):
     if sample_picker is None or not sft_samples:
         view = mo.md("")
     else:
-        idx = sample_picker.value
-        sft_s = sft_samples[idx]
-        rl_s = rl_samples[idx] if idx < len(rl_samples) else {}
+        _idx = sample_picker.value
+        _sft = sft_samples[_idx]
+        _rl = rl_samples[_idx] if _idx < len(rl_samples) else {}
 
         view = mo.md(
             "**Ground truth:**\n\n"
-            f"```json\n{sft_s.get('ground_truth', '')}\n```\n\n"
-            f"**SFT** — format_adherent={sft_s.get('format_adherent')}, "
-            f"total_match={sft_s.get('total_match')}, "
-            f"key_coverage={sft_s.get('key_coverage', 0):.1%}, "
-            f"value_accuracy={sft_s.get('value_accuracy', 0):.1%}, "
-            f"reward={sft_s.get('reward', 0):.3f}\n\n"
-            f"```json\n{sft_s.get('prediction', '')}\n```\n\n"
-            f"**RL** — format_adherent={rl_s.get('format_adherent')}, "
-            f"total_match={rl_s.get('total_match')}, "
-            f"key_coverage={rl_s.get('key_coverage', 0):.1%}, "
-            f"value_accuracy={rl_s.get('value_accuracy', 0):.1%}, "
-            f"reward={rl_s.get('reward', 0):.3f}\n\n"
-            f"```json\n{rl_s.get('prediction', '')}\n```"
+            f"```json\n{_sft.get('ground_truth', '')}\n```\n\n"
+            f"**SFT** — format={_sft.get('format_adherent')}, "
+            f"structure={_sft.get('full_structure_score', 0):.1%}, "
+            f"total_match={_sft.get('total_match')}, "
+            f"key_coverage={_sft.get('key_coverage', 0):.1%}, "
+            f"value_accuracy={_sft.get('value_accuracy', 0):.1%}, "
+            f"reward={_sft.get('reward', 0):.3f}\n\n"
+            f"```json\n{_sft.get('prediction', '')}\n```\n\n"
+            f"**RL** — format={_rl.get('format_adherent')}, "
+            f"structure={_rl.get('full_structure_score', 0):.1%}, "
+            f"total_match={_rl.get('total_match')}, "
+            f"key_coverage={_rl.get('key_coverage', 0):.1%}, "
+            f"value_accuracy={_rl.get('value_accuracy', 0):.1%}, "
+            f"reward={_rl.get('reward', 0):.3f}\n\n"
+            f"```json\n{_rl.get('prediction', '')}\n```"
         )
     view
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo, pd, rl_samples, sft_samples):
-    if not sft_samples or not rl_samples:
-        summary_df = None
-        summary_out = mo.md("_need both SFT and RL samples for summary_")
-    else:
-        n = min(len(sft_samples), len(rl_samples))
-        improved = regressed = unchanged = 0
-        tm_gained = tm_lost = 0
-        for i in range(n):
-            sr = sft_samples[i].get("reward", 0) or 0
-            rr = rl_samples[i].get("reward", 0) or 0
-            stm = sft_samples[i].get("total_match", False)
-            rtm = rl_samples[i].get("total_match", False)
-            if rr > sr + 1e-6:
-                improved += 1
-            elif rr < sr - 1e-6:
-                regressed += 1
-            else:
-                unchanged += 1
-            if not stm and rtm:
-                tm_gained += 1
-            elif stm and not rtm:
-                tm_lost += 1
-        summary_df = pd.DataFrame([
-            {"category": "RL reward > SFT", "count": improved},
-            {"category": "RL reward < SFT", "count": regressed},
-            {"category": "RL reward == SFT", "count": unchanged},
-            {"category": "Gained total_match", "count": tm_gained},
-            {"category": "Lost total_match", "count": tm_lost},
-        ])
-        summary_out = summary_df
-    summary_out
-    return
+    return (view,)
 
 
 @app.cell
@@ -977,14 +992,14 @@ def _(mo):
     The loop implements the clipped PPO surrogate with snapshotted old log-probs.
     At `ppo_epochs=1` clipping is a no-op. Tried `ppo_epochs=4` — no improvement.
 
-    Step-based EMA-reward checkpointing. RL reward peaks around step 100, dips
-    sharply around step 300 (noisy advantages from K=4 on an undertrained SFT
-    model), partially recovers. Best-EMA checkpoint captures the early peak.
+    Step-based EMA-reward checkpointing. Format and schema components stay near
+    their maximums throughout — RL maintains what SFT built. Content component
+    carries the actual RL signal. Best-EMA checkpoint captures the early peak.
 
-    RL consistently improves over SFT on all metrics despite the low absolute
-    numbers. The low starting point (4% SFT format adherence) makes each update
-    noisier — most K=4 rollouts are garbage, giving near-zero advantage variance
-    and skipped steps.
+    Note: earlier runs showed low RL improvement from a 4% SFT baseline. This
+    was caused by an evaluation bug — `build_instruction` was not called during
+    eval, so the model saw a different prompt at eval time than training. With
+    the fix, SFT (no-dropout) reaches 98% format adherence before RL even starts.
     """)
     return
 

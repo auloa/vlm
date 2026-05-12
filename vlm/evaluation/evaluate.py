@@ -45,7 +45,7 @@ class SampleEval:
     menu_is_list: bool
     total_present: bool
     format_adherent: bool
-    full_structure_adherent: bool  # all GT top-level keys + all GT per-item keys present
+    full_structure_score: float  # 0-1: fraction of GT structure reproduced in pred
     reward: float
     total_match: bool
     # Dynamic grading.
@@ -65,7 +65,7 @@ class EvalSummary:
     menu_list_rate: float
     total_present_rate: float
     format_adherence_rate: float
-    full_structure_rate: float     # all GT top-level + per-item keys present
+    mean_full_structure_score: float   # avg fraction of GT structure reproduced
     total_match_rate: float
     mean_reward: float
     mean_key_coverage: float
@@ -245,13 +245,6 @@ def _load_model_with_projector(
         image_height=cfg.vision.image_height,
         image_width=cfg.vision.image_width,
         lm_name=cfg.model.lm_name,
-        cross_attention_projector=cfg.projector.cross_attention,
-        cross_attention_projector_num_queries=cfg.projector.num_queries,
-        cross_attention_projector_num_heads=cfg.projector.num_heads,
-        cross_attention_projector_num_layers=cfg.projector.num_layers,
-        cross_attention_projector_ffn_mult=cfg.projector.ffn_mult,
-        projector_mult=cfg.projector.projector_mult,
-        projector_dropout=cfg.projector.dropout
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -333,9 +326,7 @@ def score_prediction(
         and total_present
     )
 
-    full_structure_adherent = format_adherent and _full_structure_adherent(
-        parsed_for_schema, ground_truth
-    )
+    full_structure_score = _full_structure_score(parsed_for_schema, ground_truth)
 
     reward = compute_reward(prediction, ground_truth)
     total_match = _total_matches(parsed_for_schema, ground_truth)
@@ -353,7 +344,7 @@ def score_prediction(
         menu_is_list=menu_is_list,
         total_present=total_present,
         format_adherent=format_adherent,
-        full_structure_adherent=full_structure_adherent,
+        full_structure_score=full_structure_score,
         reward=reward.total,
         total_match=total_match,
         key_coverage=coverage,
@@ -408,7 +399,7 @@ def summarize_samples(
         menu_list_rate=sum(s.menu_is_list for s in samples) / n,
         total_present_rate=sum(s.total_present for s in samples) / n,
         format_adherence_rate=sum(s.format_adherent for s in samples) / n,
-        full_structure_rate=sum(s.full_structure_adherent for s in samples) / n,
+        mean_full_structure_score=mean([s.full_structure_score for s in samples]) if samples else 0.0,
         total_match_rate=sum(s.total_match for s in samples) / n,
         mean_reward=mean([s.reward for s in samples]) if samples else 0.0,
         mean_key_coverage=mean([s.key_coverage for s in samples]) if samples else 0.0,
@@ -428,7 +419,7 @@ def print_summary(summary: EvalSummary) -> None:
     print(f"menu list rate:         {summary.menu_list_rate:.1%}")
     print(f"total present rate:     {summary.total_present_rate:.1%}")
     print(f"FORMAT ADHERENCE RATE:  {summary.format_adherence_rate:.1%}")
-    print(f"full structure rate:    {summary.full_structure_rate:.1%}")
+    print(f"mean full structure:    {summary.mean_full_structure_score:.1%}")
     print(f"total match rate:       {summary.total_match_rate:.1%}")
     print(f"mean key coverage:      {summary.mean_key_coverage:.1%}")
     print(f"mean value accuracy:    {summary.mean_value_accuracy:.1%}")
@@ -436,51 +427,57 @@ def print_summary(summary: EvalSummary) -> None:
     print(f"mean reward:            {summary.mean_reward:.3f}")
 
 
-def _full_structure_adherent(parsed, ground_truth: str) -> bool:
-    """Check that pred contains all GT top-level keys AND all GT per-item keys.
+def _full_structure_score(parsed, ground_truth: str) -> float:
+    """Continuous 0-1 score: fraction of GT structure reproduced in pred.
 
-    Top-level: every key in GT (menu, total, sub_total, void_menu) must be
-    present in pred.
+    Two components averaged equally:
+    1. Top-level coverage: GT top-level keys present in pred / total GT top-level keys
+    2. Per-item key coverage: GT per-item keys present in at least one pred item /
+       total GT per-item keys
 
-    Per-item: every key that appears in any GT menu item must appear in at
-    least one pred menu item.
+    Optional fields are handled naturally — only keys present in GT count in the
+    denominator. A receipt with no sub_total in GT won't be penalised for the
+    model also omitting sub_total.
     """
     if not isinstance(parsed, dict):
-        return False
+        return 0.0
 
     try:
         gt = json.loads(ground_truth)
     except (json.JSONDecodeError, TypeError):
-        return False
+        return 0.0
 
     if not isinstance(gt, dict):
-        return False
+        return 0.0
 
-    # All GT top-level keys present in pred.
-    for key in gt:
-        if key not in parsed:
-            return False
+    # 1. Top-level key coverage.
+    gt_top = set(gt.keys())
+    pred_top = set(parsed.keys())
+    top_score = len(gt_top & pred_top) / len(gt_top) if gt_top else 1.0
 
-    # All GT per-item keys present in at least one pred item.
+    # 2. Per-item key coverage.
     gt_menu = gt.get("menu")
     pred_menu = parsed.get("menu")
 
-    if isinstance(gt_menu, list) and gt_menu:
-        gt_item_keys: set[str] = set()
+    gt_item_keys: set[str] = set()
+    if isinstance(gt_menu, list):
         for item in gt_menu:
             if isinstance(item, dict):
                 gt_item_keys.update(item.keys())
+    elif isinstance(gt_menu, dict):
+        gt_item_keys.update(gt_menu.keys())
 
-        if gt_item_keys and isinstance(pred_menu, list) and pred_menu:
-            pred_item_keys: set[str] = set()
+    if not gt_item_keys:
+        item_score = 1.0
+    else:
+        pred_item_keys: set[str] = set()
+        if isinstance(pred_menu, list):
             for item in pred_menu:
                 if isinstance(item, dict):
                     pred_item_keys.update(item.keys())
+        item_score = len(gt_item_keys & pred_item_keys) / len(gt_item_keys)
 
-            if not gt_item_keys.issubset(pred_item_keys):
-                return False
-
-    return True
+    return (top_score + item_score) / 2.0
 
 
 def _loads_exact_json(text: str | None):
