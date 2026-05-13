@@ -1,618 +1,627 @@
+"""
+Reward function for RL alignment of the receipt VLM.
+
+Public API used elsewhere:
+    - compute_reward(generated, ground_truth) -> RewardBreakdown
+    - flatten_leaves(obj, prefix="") -> dict[str, str]
+    - value_match(pred_val, gt_val) -> float
+
+Design:
+    - Format/schema are small bonuses, not the main reward.
+    - Empty valid JSON gets tiny reward.
+    - Content dominates.
+    - Menu is scored by approximate item matching, not only menu[0], menu[1].
+    - Text values use token F1.
+    - Numeric/money values use tolerant numeric matching.
+"""
+
 import json
 import re
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from statistics import mean
+from dataclasses import dataclass
+from itertools import pairwise
 
-import torch
-from PIL import Image
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-
-from vlm.configs.training_schema import TrainingConfig
-from vlm.data.dataset import CORDDataset
-from vlm.models.receipt_vlm import ReceiptVLM
-from vlm.training.common import (
-    build_instruction,
-    ensure_dir,
-    prepare_tokenizer,
-    set_projector_only_trainable,
-)
-from vlm.training.rewards import flatten_leaves, value_match, compute_reward
-from vlm.utils.device import get_device
-from vlm.utils.json_extractor import extract_json_object
-from vlm.utils.training import set_seed
-
-
-# Format adherence in this schema means:
-#   - parseable strict JSON
-#   - has top-level `menu` (list, non-empty) — the "line_items" of the assignment
-#   - has top-level `total` (dict) with `total_price` set
-# This is the direct translation of the assignment's "line_items, total" check
-# into CORD's native nomenclature.
-REQUIRED_TOP_KEYS = {"menu", "total"}
+from vlm.utils.json_extractor import parse_json_object
 
 
 @dataclass
-class SampleEval:
-    index: int
-    ground_truth: str
-    prediction: str
-    extracted_json: str | None
-    strict_json_valid: bool
-    extractable_json_valid: bool
-    has_required_keys: bool
-    menu_is_list: bool
-    total_present: bool
-    format_adherent: bool
-    full_structure_score: float  # 0-1: fraction of GT structure reproduced in pred
-    reward: float
-    total_match: bool
-    # Dynamic grading.
-    key_coverage: float        # fraction of GT leaf keys present in prediction
-    value_accuracy: float      # average value match score across matched keys
-    extra_keys: int            # leaf keys in pred not in GT (hallucinated)
+class RewardBreakdown:
+    total: float
+    format: float
+    schema: float
+    content: float
+    hallucination: float
 
 
-@dataclass
-class EvalSummary:
-    stage: str
-    checkpoint_path: str
-    num_samples: int
-    strict_json_rate: float
-    extractable_json_rate: float
-    required_keys_rate: float
-    menu_list_rate: float
-    total_present_rate: float
-    format_adherence_rate: float
-    mean_full_structure_score: float   # avg fraction of GT structure reproduced
-    total_match_rate: float
-    mean_reward: float
-    mean_key_coverage: float
-    mean_value_accuracy: float
-    mean_extra_keys: float
+def compute_reward(generated: str, ground_truth: str) -> RewardBreakdown:
+    generated = generated.strip()
+
+    parsed = parse_json_object(generated)
+    gt = parse_json_object(ground_truth)
+
+    if gt is None:
+        try:
+            gt = json.loads(ground_truth)
+        except Exception:
+            gt = {}
+
+    if parsed is None:
+        fmt = _format_score(generated, parsed)
+        return RewardBreakdown(
+            total=_clip(fmt),
+            format=fmt,
+            schema=0.0,
+            content=0.0,
+            hallucination=0.0,
+        )
+
+    if not isinstance(parsed, dict):
+        return RewardBreakdown(
+            total=0.01,
+            format=0.01,
+            schema=0.0,
+            content=0.0,
+            hallucination=0.0,
+        )
+
+    if not isinstance(gt, dict):
+        gt = {}
+
+    fmt = _format_score(generated, parsed)
+    schema_bonus, schema_gate = _schema_score_and_gate(parsed, gt)
+
+    if _is_empty_prediction(parsed, gt):
+        total = _clip(fmt + min(schema_bonus, 0.01))
+        return RewardBreakdown(
+            total=total,
+            format=fmt,
+            schema=min(schema_bonus, 0.01),
+            content=0.0,
+            hallucination=0.0,
+        )
+
+    raw_content = _content_score(parsed, gt)
+    content = schema_gate * raw_content
+    hallucination = _hallucination_penalty(generated, parsed, gt)
+
+    total = _clip(fmt + schema_bonus + content + hallucination)
+
+    return RewardBreakdown(
+        total=total,
+        format=fmt,
+        schema=schema_bonus,
+        content=content,
+        hallucination=hallucination,
+    )
 
 
-def evaluate_checkpoint(
-    cfg: TrainingConfig,
-    checkpoint_path: str | Path,
-    stage: str,
-    num_samples: int | None = None,
-    max_completion_tokens: int | None = None,
-    temperature: float | None = None,
-    do_sample: bool = False,
-) -> EvalSummary:
-    """Evaluate one projector checkpoint on the held-out test split.
+# ----------------------------------------------------------------------
+# Format / schema
+# ----------------------------------------------------------------------
 
-    Headline metric: format_adherence_rate
-        prediction parses as strict JSON
-        AND contains required top keys (menu, total)
-        AND menu is a non-empty list
-        AND total has total_price
-
-    Additional reported metrics:
-        key_coverage:    how much of the GT structure is present in pred
-        value_accuracy:  how accurate matched values are
-        extra_keys:      avg number of hallucinated keys per sample
+def _format_score(text: str, parsed) -> float:
     """
-    device = get_device()
-    set_seed(42)
+    Tiny bonus only. Valid JSON should not dominate reward.
+    """
+    if parsed is None:
+        return 0.005 if ("{" in text and "}" in text) else 0.0
 
-    checkpoint_path = Path(checkpoint_path)
-    results_dir = ensure_dir(cfg.results_dir)
-    eval_dir = ensure_dir(results_dir / f"eval_{stage}")
+    if text.startswith("{") and text.endswith("}"):
+        return 0.03
 
-    max_samples = num_samples or cfg.eval.num_samples
-    max_completion_tokens = max_completion_tokens or cfg.eval.max_completion_tokens
-    temperature = temperature if temperature is not None else cfg.eval.temperature
-
-    print(f"evaluating stage: {stage}")
-    print(f"checkpoint: {checkpoint_path}")
-    print(f"device: {device}")
-
-    model = _load_model_with_projector(
-        cfg=cfg, checkpoint_path=checkpoint_path, device=device
-    )
-
-    tokenizer = prepare_tokenizer(model.lm.tokenizer)
-
-    # Wrap with chat template — same as SFT/RL training.
-    # cfg.model.instruction is the raw text; build_instruction applies
-    # apply_chat_template so eval sees the same prompt distribution the
-    # model was trained on.
-    instruction = build_instruction(tokenizer, cfg.model.instruction)
-
-    dataset = CORDDataset(
-        split=cfg.data.test_split,
-        max_samples=max_samples,
-        dataset_name=cfg.data.dataset_name,
-        tokenizer=tokenizer,
-        max_target_length=cfg.sft.max_target_length,
-    )
-
-    loader = DataLoader(
-        dataset, batch_size=1, shuffle=False, collate_fn=_eval_collate
-    )
-
-    samples: list[SampleEval] = []
-
-    with SummaryWriter(log_dir=str(cfg.root_dir / "runs" / f"eval_{stage}")) as writer:
-        for index, batch in enumerate(loader):
-            image = batch["image"][0]
-            ground_truth = batch["label"][0]
-
-            prediction = generate_one(
-                model=model,
-                image=image,
-                tokenizer=tokenizer,
-                instruction=instruction,
-                max_completion_tokens=max_completion_tokens,
-                temperature=temperature,
-                do_sample=do_sample,
-            )
-
-            sample_eval = score_prediction(
-                index=index, prediction=prediction, ground_truth=ground_truth
-            )
-            samples.append(sample_eval)
-
-            writer.add_scalar("eval/format_adherent", float(sample_eval.format_adherent), index)
-            writer.add_scalar("eval/reward", sample_eval.reward, index)
-            writer.add_scalar("eval/key_coverage", sample_eval.key_coverage, index)
-            writer.add_scalar("eval/value_accuracy", sample_eval.value_accuracy, index)
-
-            if index < 10:
-                writer.add_text(
-                    f"eval/sample_{index}",
-                    _format_sample_markdown(sample_eval),
-                    index,
-                )
-
-    summary = summarize_samples(
-        stage=stage, checkpoint_path=checkpoint_path, samples=samples
-    )
-
-    _save_json(eval_dir / "summary.json", asdict(summary))
-    _save_jsonl(eval_dir / "samples.jsonl", [asdict(s) for s in samples])
-    _save_markdown_report(eval_dir / "samples.md", summary, samples)
-
-    print_summary(summary)
-    print(f"saved summary: {eval_dir / 'summary.json'}")
-    print(f"saved samples: {eval_dir / 'samples.jsonl'}")
-    print(f"saved report:  {eval_dir / 'samples.md'}")
-
-    return summary
+    return 0.01
 
 
-def compare_sft_and_rl(
-    cfg: TrainingConfig,
-    num_samples: int | None = None,
-    max_completion_tokens: int | None = None,
-) -> None:
-    """Evaluate SFT and RL checkpoints and save a comparison summary."""
-    summaries = []
+def _schema_score_and_gate(parsed: dict, gt: dict) -> tuple[float, float]:
+    """
+    Returns:
+        schema_bonus: small positive bonus, max 0.05
+        schema_gate: multiplier for content, 0-1
+    """
+    if not isinstance(parsed, dict):
+        return 0.0, 0.0
 
-    summaries.append(
-        evaluate_checkpoint(
-            cfg=cfg,
-            checkpoint_path=cfg.sft_best_checkpoint,
-            stage="sft",
-            num_samples=num_samples,
-            max_completion_tokens=max_completion_tokens,
-            do_sample=False,
-        )
-    )
+    bonus = 0.0
+    gate = 0.35
 
-    summaries.append(
-        evaluate_checkpoint(
-            cfg=cfg,
-            checkpoint_path=cfg.rl_best_checkpoint,
-            stage="rl",
-            num_samples=num_samples,
-            max_completion_tokens=max_completion_tokens,
-            do_sample=False,
-        )
-    )
+    gt_menu = gt.get("menu")
+    pred_menu = parsed.get("menu")
 
-    comparison = {summary.stage: asdict(summary) for summary in summaries}
+    gt_total = gt.get("total")
+    pred_total = parsed.get("total")
 
-    results_dir = ensure_dir(cfg.results_dir)
-    _save_json(results_dir / "eval_comparison.json", comparison)
+    if isinstance(gt_menu, list):
+        if isinstance(pred_menu, list):
+            bonus += 0.015
+            gate += 0.25
+        else:
+            gate -= 0.20
 
-    print("\ncomparison")
-    print("-" * 80)
-    for summary in summaries:
-        print(
-            f"{summary.stage:>4} | "
-            f"format={summary.format_adherence_rate:.1%} | "
-            f"coverage={summary.mean_key_coverage:.1%} | "
-            f"value_acc={summary.mean_value_accuracy:.1%} | "
-            f"reward={summary.mean_reward:.3f}"
-        )
+    if isinstance(gt_total, dict):
+        if isinstance(pred_total, dict):
+            bonus += 0.015
+            gate += 0.25
+        else:
+            gate -= 0.20
 
-    print(f"\nsaved comparison: {results_dir / 'eval_comparison.json'}")
+    if gt:
+        overlap = len(set(parsed.keys()) & set(gt.keys())) / max(len(gt), 1)
+        bonus += 0.02 * overlap
+        gate += 0.15 * overlap
+
+    return min(0.05, max(0.0, bonus)), min(1.0, max(0.0, gate))
 
 
-def _load_model_with_projector(
-    cfg: TrainingConfig,
-    checkpoint_path: Path,
-    device: torch.device,
-) -> ReceiptVLM:
-    model = ReceiptVLM(
-        device=device,
-        vision_model_name=cfg.vision.model_name,
-        default_vision_processor=cfg.vision.default_processor,
-        image_height=cfg.vision.image_height,
-        image_width=cfg.vision.image_width,
-        lm_name=cfg.model.lm_name,
-        cross_attention_projector=cfg.projector.cross_attention,
-        cross_attention_projector_num_queries=cfg.projector.num_queries,
-        cross_attention_projector_num_heads=cfg.projector.num_heads,
-        cross_attention_projector_num_layers=cfg.projector.num_layers,
-        cross_attention_projector_ffn_mult=cfg.projector.ffn_mult,
-        projector_mult=cfg.projector.projector_mult,
-        projector_dropout=cfg.projector.dropout
-    )
-
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.projector.load_state_dict(checkpoint["projector_state_dict"])
-
-    set_projector_only_trainable(model)
-    model.eval()
-    return model
-
-
-def generate_one(
-    model: ReceiptVLM,
-    image: Image.Image,
-    tokenizer,
-    instruction: str,
-    max_completion_tokens: int,
-    temperature: float,
-    do_sample: bool,
-) -> str:
-    device = model.device
-
-    prompt_tokens = tokenizer(
-        instruction, return_tensors="pt", add_special_tokens=True
-    )
-
-    input_ids = prompt_tokens["input_ids"].to(device)
-    attention_mask = prompt_tokens["attention_mask"].to(device)
-
-    with torch.no_grad():
-        inputs_embeds, full_attention_mask = model.prepare_inputs_embeds(
-            images=[image],
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-
-        generation_kwargs = {
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": full_attention_mask,
-            "max_length": inputs_embeds.shape[1] + max_completion_tokens,
-            "do_sample": do_sample,
-            "pad_token_id": tokenizer.pad_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-            "use_cache": True,
-            "return_dict_in_generate": True,
-            "repetition_penalty": 1.1,
-        }
-
-        if do_sample:
-            generation_kwargs["temperature"] = temperature
-            generation_kwargs["top_p"] = 0.95
-
-        output = model.lm.model.generate(**generation_kwargs)
-
-    return tokenizer.decode(output.sequences[0], skip_special_tokens=True).strip()
-
-
-def score_prediction(
-    index: int,
-    prediction: str,
-    ground_truth: str,
-) -> SampleEval:
-    strict_parsed = _loads_exact_json(prediction)
-    extracted = extract_json_object(prediction)
-    extracted_parsed = _loads_exact_json(extracted) if extracted is not None else None
-
-    parsed_for_schema = strict_parsed if strict_parsed is not None else extracted_parsed
-
-    strict_json_valid = strict_parsed is not None
-    extractable_json_valid = extracted_parsed is not None
-
-    has_required_keys = _has_required_keys(parsed_for_schema)
-    menu_is_list = _menu_is_list(parsed_for_schema)
-    total_present = _total_present(parsed_for_schema)
-
-    format_adherent = (
-        strict_json_valid
-        and has_required_keys
-        and menu_is_list
-        and total_present
-    )
-
-    full_structure_score = _full_structure_score(parsed_for_schema, ground_truth)
-
-    reward = compute_reward(prediction, ground_truth)
-    total_match = _total_matches(parsed_for_schema, ground_truth)
-
-    coverage, value_acc, extra = _dynamic_grade(parsed_for_schema, ground_truth)
-
-    return SampleEval(
-        index=index,
-        ground_truth=ground_truth,
-        prediction=prediction,
-        extracted_json=extracted,
-        strict_json_valid=strict_json_valid,
-        extractable_json_valid=extractable_json_valid,
-        has_required_keys=has_required_keys,
-        menu_is_list=menu_is_list,
-        total_present=total_present,
-        format_adherent=format_adherent,
-        full_structure_score=full_structure_score,
-        reward=reward.total,
-        total_match=total_match,
-        key_coverage=coverage,
-        value_accuracy=value_acc,
-        extra_keys=extra,
-    )
-
-
-def _dynamic_grade(parsed, ground_truth: str) -> tuple[float, float, int]:
-    """Per-key grading using the same logic as the reward function."""
-    try:
-        gt = json.loads(ground_truth)
-    except (json.JSONDecodeError, TypeError):
-        return 0.0, 0.0, 0
-
-    if not isinstance(parsed, dict) or not isinstance(gt, dict):
-        return 0.0, 0.0, 0
-
-    gt_leaves = flatten_leaves(gt)
-    pred_leaves = flatten_leaves(parsed)
+def _is_empty_prediction(parsed: dict, gt: dict) -> bool:
+    gt_leaves = _flatten_leaves(gt)
+    pred_leaves = _flatten_leaves(parsed)
 
     if not gt_leaves:
-        return 0.0, 0.0, len(pred_leaves)
+        return False
 
-    matched_scores = [
-        value_match(pred_leaves[path], gt_val)
+    if not pred_leaves:
+        return True
+
+    meaningful = [
+        str(v).strip()
+        for v in pred_leaves.values()
+        if str(v).strip() not in {"", "null", "None", "[]", "{}"}
+    ]
+
+    return len(meaningful) == 0
+
+
+# ----------------------------------------------------------------------
+# Content
+# ----------------------------------------------------------------------
+
+def _content_score(pred: dict, gt: dict) -> float:
+    """
+    Max content reward: 0.85
+
+    Breakdown:
+        total:      0.25
+        menu:       0.45
+        sub_total:  0.10
+        other:      0.05
+    """
+    if not gt:
+        return 0.0
+
+    total_score = _total_score(pred.get("total"), gt.get("total"))
+    menu_score = _menu_score(pred.get("menu"), gt.get("menu"))
+    subtotal_score = _generic_structure_score(pred.get("sub_total"), gt.get("sub_total"))
+    other_score = _other_fields_score(pred, gt)
+
+    score = (
+        0.25 * total_score
+        + 0.45 * menu_score
+        + 0.10 * subtotal_score
+        + 0.05 * other_score
+    )
+
+    return min(0.85, max(0.0, score))
+
+
+def _total_score(pred_total, gt_total) -> float:
+    if not isinstance(gt_total, dict) or not gt_total:
+        return 1.0 if not pred_total else 0.0
+
+    if not isinstance(pred_total, dict):
+        return 0.0
+
+    gt_leaves = _flatten_leaves(gt_total)
+    pred_leaves = _flatten_leaves(pred_total)
+
+    if not gt_leaves:
+        return 1.0
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for path, gt_val in gt_leaves.items():
+        key = path.split(".")[-1]
+        weight = 3.0 if key in {"total_price", "total", "price"} else 1.0
+        pred_val = pred_leaves.get(path, "")
+
+        weighted_sum += weight * _value_match(pred_val, gt_val)
+        weight_total += weight
+
+    return weighted_sum / max(weight_total, 1e-8)
+
+
+def _menu_score(pred_menu, gt_menu) -> float:
+    """
+    Approximate item-level menu score.
+    Does not require exact item order.
+    """
+    if not isinstance(gt_menu, list) or len(gt_menu) == 0:
+        return 1.0 if not pred_menu else 0.0
+
+    if not isinstance(pred_menu, list) or len(pred_menu) == 0:
+        return 0.0
+
+    gt_items = [x for x in gt_menu if isinstance(x, dict)]
+    pred_items = [x for x in pred_menu if isinstance(x, dict)]
+
+    if not gt_items:
+        return 1.0 if not pred_items else 0.0
+
+    if not pred_items:
+        return 0.0
+
+    matches = _greedy_item_matches(pred_items, gt_items)
+
+    if not matches:
+        return 0.0
+
+    real_matches = [m for m in matches if m[2] >= 0.45]
+
+    precision = len(real_matches) / len(pred_items)
+    recall = len(real_matches) / len(gt_items)
+
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+
+    quality = sum(m[2] for m in real_matches) / len(real_matches) if real_matches else 0.0
+
+    return min(1.0, max(0.0, 0.65 * f1 + 0.35 * quality))
+
+
+def _greedy_item_matches(pred_items: list[dict], gt_items: list[dict]) -> list[tuple[int, int, float]]:
+    candidates = []
+
+    for pi, pred in enumerate(pred_items):
+        for gi, gt in enumerate(gt_items):
+            candidates.append((pi, gi, _item_similarity(pred, gt)))
+
+    candidates.sort(key=lambda x: x[2], reverse=True)
+
+    used_pred = set()
+    used_gt = set()
+    matches = []
+
+    for pi, gi, sim in candidates:
+        if pi in used_pred or gi in used_gt:
+            continue
+        if sim <= 0.0:
+            continue
+
+        used_pred.add(pi)
+        used_gt.add(gi)
+        matches.append((pi, gi, sim))
+
+    return matches
+
+
+def _item_similarity(pred_item: dict, gt_item: dict) -> float:
+    pred_name = pred_item.get("nm", "")
+    gt_name = gt_item.get("nm", "")
+
+    pred_price = pred_item.get("price", "")
+    gt_price = gt_item.get("price", "")
+
+    name_score = _text_f1(pred_name, gt_name)
+    price_score = _money_match(pred_price, gt_price)
+
+    extra_scores = []
+    for key, gt_val in gt_item.items():
+        if key in {"nm", "price"}:
+            continue
+        if key in pred_item:
+            extra_scores.append(_value_match(pred_item[key], gt_val))
+
+    extra_score = sum(extra_scores) / len(extra_scores) if extra_scores else 0.0
+
+    if str(gt_name).strip() and str(gt_price).strip():
+        return 0.55 * name_score + 0.35 * price_score + 0.10 * extra_score
+
+    if str(gt_name).strip():
+        return 0.85 * name_score + 0.15 * extra_score
+
+    if str(gt_price).strip():
+        return 0.85 * price_score + 0.15 * extra_score
+
+    return extra_score
+
+
+def _generic_structure_score(pred_obj, gt_obj) -> float:
+    if gt_obj is None:
+        return 1.0 if pred_obj is None else 0.0
+
+    gt_leaves = _flatten_leaves(gt_obj)
+    pred_leaves = _flatten_leaves(pred_obj)
+
+    if not gt_leaves:
+        return 1.0 if not pred_leaves else 0.0
+
+    matched = [
+        _value_match(pred_leaves[path], gt_val)
         for path, gt_val in gt_leaves.items()
         if path in pred_leaves
     ]
 
-    coverage = len(matched_scores) / len(gt_leaves)
-    value_acc = sum(matched_scores) / len(matched_scores) if matched_scores else 0.0
-    extra = len(set(pred_leaves) - set(gt_leaves))
+    coverage = len(matched) / len(gt_leaves)
+    value_acc = sum(matched) / len(matched) if matched else 0.0
 
-    return coverage, value_acc, extra
-
-
-def summarize_samples(
-    stage: str,
-    checkpoint_path: Path,
-    samples: list[SampleEval],
-) -> EvalSummary:
-    n = max(1, len(samples))
-
-    return EvalSummary(
-        stage=stage,
-        checkpoint_path=str(checkpoint_path),
-        num_samples=len(samples),
-        strict_json_rate=sum(s.strict_json_valid for s in samples) / n,
-        extractable_json_rate=sum(s.extractable_json_valid for s in samples) / n,
-        required_keys_rate=sum(s.has_required_keys for s in samples) / n,
-        menu_list_rate=sum(s.menu_is_list for s in samples) / n,
-        total_present_rate=sum(s.total_present for s in samples) / n,
-        format_adherence_rate=sum(s.format_adherent for s in samples) / n,
-        mean_full_structure_score=mean([s.full_structure_score for s in samples]) if samples else 0.0,
-        total_match_rate=sum(s.total_match for s in samples) / n,
-        mean_reward=mean([s.reward for s in samples]) if samples else 0.0,
-        mean_key_coverage=mean([s.key_coverage for s in samples]) if samples else 0.0,
-        mean_value_accuracy=mean([s.value_accuracy for s in samples]) if samples else 0.0,
-        mean_extra_keys=mean([s.extra_keys for s in samples]) if samples else 0.0,
-    )
+    return coverage * value_acc
 
 
-def print_summary(summary: EvalSummary) -> None:
-    print("\nsummary")
-    print("-" * 80)
-    print(f"stage:                  {summary.stage}")
-    print(f"num samples:            {summary.num_samples}")
-    print(f"strict JSON rate:       {summary.strict_json_rate:.1%}")
-    print(f"extractable JSON rate:  {summary.extractable_json_rate:.1%}")
-    print(f"required keys rate:     {summary.required_keys_rate:.1%}")
-    print(f"menu list rate:         {summary.menu_list_rate:.1%}")
-    print(f"total present rate:     {summary.total_present_rate:.1%}")
-    print(f"FORMAT ADHERENCE RATE:  {summary.format_adherence_rate:.1%}")
-    print(f"mean full structure:    {summary.mean_full_structure_score:.1%}")
-    print(f"total match rate:       {summary.total_match_rate:.1%}")
-    print(f"mean key coverage:      {summary.mean_key_coverage:.1%}")
-    print(f"mean value accuracy:    {summary.mean_value_accuracy:.1%}")
-    print(f"mean extra keys:        {summary.mean_extra_keys:.2f}")
-    print(f"mean reward:            {summary.mean_reward:.3f}")
+def _other_fields_score(pred: dict, gt: dict) -> float:
+    excluded = {"menu", "total", "sub_total"}
+
+    gt_other = {k: v for k, v in gt.items() if k not in excluded}
+    pred_other = {k: v for k, v in pred.items() if k not in excluded}
+
+    if not gt_other:
+        return 1.0 if not pred_other else 0.0
+
+    return _generic_structure_score(pred_other, gt_other)
 
 
-def _full_structure_score(parsed, ground_truth: str) -> float:
-    """Continuous 0-1 score: fraction of GT structure reproduced in pred.
+# ----------------------------------------------------------------------
+# Value matching
+# ----------------------------------------------------------------------
 
-    Two components averaged equally:
-    1. Top-level coverage: GT top-level keys present in pred / total GT top-level keys
-    2. Per-item key coverage: GT per-item keys present in at least one pred item /
-       total GT per-item keys
+def value_match(pred_val, gt_val) -> float:
+    return _value_match(pred_val, gt_val)
 
-    Optional fields are handled naturally — only keys present in GT count in the
-    denominator. A receipt with no sub_total in GT won't be penalised for the
-    model also omitting sub_total.
-    """
-    if not isinstance(parsed, dict):
+
+def _value_match(pred_val, gt_val) -> float:
+    pred_str = "" if pred_val is None else str(pred_val)
+    gt_str = "" if gt_val is None else str(gt_val)
+
+    if not gt_str.strip():
+        return 1.0 if not pred_str.strip() else 0.0
+
+    if _looks_numeric(gt_str):
+        return _money_match(pred_str, gt_str)
+
+    return _text_f1(pred_str, gt_str)
+
+
+def _money_match(pred_val, gt_val) -> float:
+    pred_num = _parse_number(pred_val)
+    gt_num = _parse_number(gt_val)
+
+    if gt_num is None:
+        return _text_f1(pred_val, gt_val)
+
+    if pred_num is None:
+        pred_digits = _digits_only(pred_val)
+        gt_digits = _digits_only(gt_val)
+
+        if pred_digits and pred_digits == gt_digits:
+            return 1.0
+
+        if pred_digits and gt_digits and (pred_digits in gt_digits or gt_digits in pred_digits):
+            return 0.4
+
         return 0.0
 
-    try:
-        gt = json.loads(ground_truth)
-    except (json.JSONDecodeError, TypeError):
+    diff = abs(pred_num - gt_num)
+
+    if diff < 1e-8:
+        return 1.0
+    if diff <= 0.01:
+        return 0.9
+    if diff <= 0.05:
+        return 0.7
+    if diff <= 0.10:
+        return 0.5
+    if diff <= 0.50:
+        return 0.25
+
+    return 0.0
+
+
+def _text_f1(pred_val, gt_val) -> float:
+    pred_tokens = _tokens(pred_val)
+    gt_tokens = _tokens(gt_val)
+
+    if not gt_tokens:
+        return 1.0 if not pred_tokens else 0.0
+
+    if not pred_tokens:
         return 0.0
 
-    if not isinstance(gt, dict):
+    overlap = len(pred_tokens & gt_tokens)
+
+    if overlap == 0:
         return 0.0
 
-    # 1. Top-level key coverage.
-    gt_top = set(gt.keys())
-    pred_top = set(parsed.keys())
-    top_score = len(gt_top & pred_top) / len(gt_top) if gt_top else 1.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gt_tokens)
 
-    # 2. Per-item key coverage.
-    gt_menu = gt.get("menu")
-    pred_menu = parsed.get("menu")
-
-    gt_item_keys: set[str] = set()
-    if isinstance(gt_menu, list):
-        for item in gt_menu:
-            if isinstance(item, dict):
-                gt_item_keys.update(item.keys())
-    elif isinstance(gt_menu, dict):
-        gt_item_keys.update(gt_menu.keys())
-
-    if not gt_item_keys:
-        item_score = 1.0
-    else:
-        pred_item_keys: set[str] = set()
-        if isinstance(pred_menu, list):
-            for item in pred_menu:
-                if isinstance(item, dict):
-                    pred_item_keys.update(item.keys())
-        item_score = len(gt_item_keys & pred_item_keys) / len(gt_item_keys)
-
-    return (top_score + item_score) / 2.0
+    return 2 * precision * recall / max(precision + recall, 1e-8)
 
 
-def _loads_exact_json(text: str | None):
-    if text is None:
-        return None
-    try:
-        return json.loads(text.strip())
-    except (json.JSONDecodeError, TypeError):
+def _looks_numeric(value) -> bool:
+    s = str(value).strip()
+    digits = _digits_only(s)
+
+    if not digits:
+        return False
+
+    return len(digits) / max(len(s), 1) >= 0.50
+
+
+def _parse_number(value) -> float | None:
+    s = str(value).strip()
+
+    if not s:
         return None
 
+    s = re.sub(r"[^0-9,.\-]", "", s)
 
-def _has_required_keys(parsed) -> bool:
-    return isinstance(parsed, dict) and REQUIRED_TOP_KEYS.issubset(parsed.keys())
+    if not re.search(r"\d", s):
+        return None
 
+    if "," in s and "." in s:
+        s = s.replace(",", "")
+    elif "," in s and "." not in s:
+        s = s.replace(",", ".")
 
-def _menu_is_list(parsed) -> bool:
-    if not isinstance(parsed, dict):
-        return False
-    menu = parsed.get("menu")
-    return isinstance(menu, list) and len(menu) > 0
-
-
-def _total_present(parsed) -> bool:
-    if not isinstance(parsed, dict):
-        return False
-    total = parsed.get("total")
-    if not isinstance(total, dict):
-        return False
-    tp = total.get("total_price")
-    return tp is not None and str(tp).strip() != ""
-
-
-def _total_matches(parsed, ground_truth: str) -> bool:
-    """Compare predicted total.total_price digits to GT digits (tolerant)."""
-    if not isinstance(parsed, dict):
-        return False
-    pred_total_block = parsed.get("total")
-    if not isinstance(pred_total_block, dict):
-        return False
+    if s.count(".") > 1:
+        parts = s.split(".")
+        s = "".join(parts[:-1]) + "." + parts[-1]
 
     try:
-        gt = json.loads(ground_truth)
-    except json.JSONDecodeError:
-        return False
-
-    gt_total_block = gt.get("total") if isinstance(gt, dict) else None
-    if not isinstance(gt_total_block, dict):
-        return False
-
-    pred_total = _normalize_numberish(pred_total_block.get("total_price", ""))
-    gt_total = _normalize_numberish(gt_total_block.get("total_price", ""))
-
-    return bool(pred_total and gt_total and pred_total == gt_total)
+        return float(s)
+    except ValueError:
+        return None
 
 
-def _normalize_numberish(value) -> str:
-    return re.sub(r"[^0-9]", "", str(value).lower().strip())
+# ----------------------------------------------------------------------
+# Hallucination
+# ----------------------------------------------------------------------
 
+def _hallucination_penalty(text: str, parsed: dict, gt: dict) -> float:
+    penalty = 0.0
 
-def _eval_collate(batch):
-    return {
-        "image": [sample["image"] for sample in batch],
-        "label": [sample["label"] for sample in batch],
-    }
+    gt_leaves = _flatten_leaves(gt)
+    pred_leaves = _flatten_leaves(parsed)
 
+    # Extra top-level sections.
+    extra_top = set(parsed.keys()) - set(gt.keys())
+    if extra_top:
+        penalty -= min(0.15, 0.04 * len(extra_top))
 
-def _save_json(path: Path, obj) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-
-
-def _save_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def _save_markdown_report(
-    path: Path,
-    summary: EvalSummary,
-    samples: list[SampleEval],
-    max_samples: int = 20,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    lines = [
-        f"# Evaluation Report: {summary.stage}",
-        "",
-        "## Summary",
-        "",
-        f"- Checkpoint: `{summary.checkpoint_path}`",
-        f"- Number of samples: {summary.num_samples}",
-        f"- Strict JSON rate: {summary.strict_json_rate:.1%}",
-        f"- Extractable JSON rate: {summary.extractable_json_rate:.1%}",
-        f"- Required keys rate: {summary.required_keys_rate:.1%}",
-        f"- Format adherence rate: **{summary.format_adherence_rate:.1%}**",
-        f"- Total match rate: {summary.total_match_rate:.1%}",
-        f"- Mean key coverage: {summary.mean_key_coverage:.1%}",
-        f"- Mean value accuracy: {summary.mean_value_accuracy:.1%}",
-        f"- Mean extra keys: {summary.mean_extra_keys:.2f}",
-        f"- Mean reward: {summary.mean_reward:.3f}",
-        "",
-        "## Sample Outputs",
-        "",
+    # Extra leaf paths, except menu item paths because menu is handled separately.
+    extra_leaf_paths = [
+        path
+        for path in set(pred_leaves) - set(gt_leaves)
+        if not path.startswith("menu[")
     ]
 
-    for sample in samples[:max_samples]:
-        lines.append(_format_sample_markdown(sample))
-        lines.append("\n---\n")
+    if extra_leaf_paths:
+        penalty -= min(0.20, 0.015 * len(extra_leaf_paths))
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    # Wrong non-empty value where GT is empty.
+    for path, gt_val in gt_leaves.items():
+        if path not in pred_leaves:
+            continue
+
+        if not str(gt_val).strip() and str(pred_leaves[path]).strip():
+            penalty -= 0.02
+
+    penalty += _menu_hallucination_penalty(parsed.get("menu"), gt.get("menu"))
+
+    if "<|user|>" in text or "<|assistant|>" in text or "<|system|>" in text:
+        penalty -= 0.10
+
+    if _repeated_char_ratio(text) > 0.50:
+        penalty -= 0.05
+
+    gt_len = len(str(gt))
+    if gt_len > 0 and len(text) > 4 * gt_len:
+        penalty -= 0.05
+
+    return max(-0.35, penalty)
 
 
-def _format_sample_markdown(sample: SampleEval) -> str:
-    return (
-        f"### Sample {sample.index}\n\n"
-        f"- Format adherent: `{sample.format_adherent}`\n"
-        f"- Strict JSON valid: `{sample.strict_json_valid}`\n"
-        f"- Required keys: `{sample.has_required_keys}`\n"
-        f"- Reward: `{sample.reward:.3f}`\n"
-        f"- Total match: `{sample.total_match}`\n"
-        f"- Key coverage: `{sample.key_coverage:.1%}`\n"
-        f"- Value accuracy: `{sample.value_accuracy:.1%}`\n"
-        f"- Extra keys: `{sample.extra_keys}`\n\n"
-        f"**Ground truth**\n\n"
-        f"```json\n{sample.ground_truth}\n```\n\n"
-        f"**Prediction**\n\n"
-        f"```text\n{sample.prediction[:1200]}\n```\n"
-    )
+def _menu_hallucination_penalty(pred_menu, gt_menu) -> float:
+    if not isinstance(pred_menu, list):
+        return 0.0
+
+    pred_items = [x for x in pred_menu if isinstance(x, dict)]
+
+    if not pred_items:
+        return 0.0
+
+    if not isinstance(gt_menu, list):
+        return -min(0.15, 0.03 * len(pred_items))
+
+    gt_items = [x for x in gt_menu if isinstance(x, dict)]
+
+    if not gt_items:
+        return -min(0.15, 0.03 * len(pred_items))
+
+    matches = _greedy_item_matches(pred_items, gt_items)
+    real_matches = [m for m in matches if m[2] >= 0.45]
+
+    unmatched_pred = max(0, len(pred_items) - len(real_matches))
+
+    penalty = -min(0.20, 0.03 * unmatched_pred)
+
+    if len(pred_items) > 2 * len(gt_items):
+        penalty -= 0.10
+    elif len(pred_items) > 1.5 * len(gt_items):
+        penalty -= 0.05
+
+    names = [
+        _norm(item.get("nm", ""))
+        for item in pred_items
+        if _norm(item.get("nm", ""))
+    ]
+
+    if names:
+        duplicate_ratio = 1.0 - (len(set(names)) / len(names))
+
+        if duplicate_ratio > 0.50:
+            penalty -= 0.10
+        elif duplicate_ratio > 0.25:
+            penalty -= 0.05
+
+    return penalty
+
+
+# ----------------------------------------------------------------------
+# Flattening
+# ----------------------------------------------------------------------
+
+def flatten_leaves(obj, prefix: str = "") -> dict[str, str]:
+    return _flatten_leaves(obj, prefix)
+
+
+def _flatten_leaves(obj, prefix: str = "") -> dict[str, str]:
+    out: dict[str, str] = {}
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            new_prefix = f"{prefix}.{key}" if prefix else str(key)
+
+            if isinstance(value, (dict, list)):
+                out.update(_flatten_leaves(value, new_prefix))
+            else:
+                out[new_prefix] = "" if value is None else str(value)
+
+    elif isinstance(obj, list):
+        for index, item in enumerate(obj):
+            new_prefix = f"{prefix}[{index}]"
+
+            if isinstance(item, (dict, list)):
+                out.update(_flatten_leaves(item, new_prefix))
+            else:
+                out[new_prefix] = "" if item is None else str(item)
+
+    return out
+
+
+# ----------------------------------------------------------------------
+# Utilities
+# ----------------------------------------------------------------------
+
+def _tokens(value) -> set[str]:
+    return set(re.findall(r"\b\w+\b", str(value).lower()))
+
+
+def _digits_only(value) -> str:
+    return re.sub(r"\D", "", str(value))
+
+
+def _norm(value) -> str:
+    return re.sub(r"\s+", " ", str(value).lower().strip())
+
+
+def _repeated_char_ratio(text: str) -> float:
+    if len(text) < 2:
+        return 0.0
+
+    repeated = sum(1 for a, b in pairwise(text) if a == b)
+    return repeated / (len(text) - 1)
+
+
+def _clip(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
