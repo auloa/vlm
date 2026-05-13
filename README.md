@@ -100,7 +100,7 @@ uv run python -m vlm.scripts.evaluate  -c debug
 ```
 
 ### TensorBoard and walkthrough
-
+> For full training curves, per-sample predictions, and design decision analysis see the interactive walkthrough:
 ```bash
 uv run tensorboard --logdir training_runs/b4_stable_short/runs
 uv run marimo run walkthrough.py
@@ -116,10 +116,6 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 | `base` | Baseline — batch 4, dropout 0.15, default settings |
 | 'b4_stable_short` | Submission config |
 
-> For full training curves, per-sample predictions, and design decision analysis see the interactive walkthrough:
-> ```bash
-> uv run marimo run walkthrough.py
-> ```
 **Key config fields (Defaults):**
 
 | Section | Field                       | Default | What it controls                                               |
