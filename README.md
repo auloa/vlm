@@ -102,7 +102,7 @@ uv run python -m vlm.scripts.evaluate  -c debug
 ### TensorBoard and walkthrough
 
 ```bash
-tensorboard --logdir training_runs/b4_stable_short/runs
+uv run tensorboard --logdir training_runs/b4_stable_short/runs
 uv run marimo run walkthrough.py
 ```
 ---
