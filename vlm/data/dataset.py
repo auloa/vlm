@@ -265,7 +265,7 @@ class CORDDataset(Dataset):
         for entry in self.dropped:
             by_reason[entry["reason"]].append(entry)
 
-        print(f"\n=== dataset filter summary ===")
+        print("\n=== dataset filter summary ===")
         print(f"loaded:           {self.num_loaded}")
         print(f"parse_failed:     {self.num_parse_failed}")
         print(f"empty_items:      {self.num_empty_items}")

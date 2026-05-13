@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
-
 from vlm.models.receipt_vlm import ReceiptVLM
 
 

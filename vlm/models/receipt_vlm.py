@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 from PIL import Image
-from vlm.models.language_model import CausalLM
 from vlm.models.ca_resampler import EmbeddingsResampler
+from vlm.models.language_model import CausalLM
 from vlm.models.projector import Projector
 from vlm.models.vision_encoder import DonutVisionEncoder
 

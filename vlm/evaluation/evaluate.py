@@ -8,7 +8,6 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
 from vlm.configs.training_schema import TrainingConfig
 from vlm.data.dataset import CORDDataset
 from vlm.models.receipt_vlm import ReceiptVLM
@@ -18,11 +17,10 @@ from vlm.training.common import (
     prepare_tokenizer,
     set_projector_only_trainable,
 )
-from vlm.training.rewards import flatten_leaves, value_match, compute_reward
+from vlm.training.rewards import compute_reward, flatten_leaves, value_match
 from vlm.utils.device import get_device
 from vlm.utils.json_extractor import extract_json_object
 from vlm.utils.training import set_seed
-
 
 # Format adherence in this schema means:
 #   - parseable strict JSON
