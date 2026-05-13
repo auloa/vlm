@@ -257,6 +257,7 @@ def _load_model_with_projector(
 
     set_projector_only_trainable(model)
     model.eval()
+    print("**Complete model in eval mode for evaluation Now**")
     return model
 
 
