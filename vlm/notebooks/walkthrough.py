@@ -16,8 +16,10 @@ def _(mo):
     mo.md("""
     # vlm — walkthrough
 
-    A walk through the components of the pipeline, along with discussion on the components.
-    We will also go over the artifacts created by these modules `train_sft`, `train_rl`, and `evaluate`.
+    Interactive evidence companion to `README.md`. The README is the reproducible
+    entry point; this notebook is for inspecting artifacts from
+    `training_runs/b4_stable_short/`: TensorBoard curves, evaluation summaries,
+    qualitative samples, and design notes.
 
     **Sections:**
     1. Architecture overview
@@ -28,12 +30,11 @@ def _(mo):
     6. Eval results
     7. Per-sample inspector
     8. Design decisions (retrospective)
-    9. conclusion
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     import json
     from pathlib import Path
@@ -226,7 +227,7 @@ def _(image, instruction, mo, model, tokenizer, torch):
     return full_attn, inputs_embeds, prompt_ids, visual_embeds
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(full_attn, inputs_embeds, mo, model, tokenizer, torch):
     # Generate a short completion to demonstrate the inputs_embeds path works end-to-end.
     with torch.no_grad():
@@ -261,7 +262,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
     import json as _json_mask
 
@@ -286,7 +287,7 @@ def _(mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
         f"**Sequence breakdown:**\n\n"
         f"| Region | Token positions | Length | In loss? |\n"
         f"|---|---|---|---|\n"
-        f"| Visual prefix | `0 … {visual_len - 1}` | {visual_len} |  masked |\n"
+        f"| Visual prefix | `0 … {visual_len - 1}` | {visual_len} | masked |\n"
         f"| Instruction prompt | `{visual_len} … {visual_len + prompt_len - 1}` | {prompt_len} | masked |\n"
         f"| Target JSON | `{visual_len + prompt_len} … {total_len - 1}` | {target_len} | contributes |\n\n"
         f"**Loss-contributing tokens:** {contributing} / {total_len} "
@@ -302,8 +303,9 @@ def _(mo):
     mo.md("""
     ## 3. Dataset
 
-    CORD-v2 receipts converted to a simple `{line_items, total}` JSON schema.
-    Pick a sample to see the receipt image alongside the parsed ground truth.
+    CORD-v2 receipts parsed into the native CORD-style JSON schema: `menu`,
+    `sub_total`, `total`, and optional visible fields. Pick a sample to see the
+    receipt image alongside the parsed ground truth.
     """)
     return
 
@@ -315,14 +317,14 @@ def _():
     return (load_dataset,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(load_dataset, mo):
     raw_ds = load_dataset("naver-clova-ix/cord-v2", split="train")
     mo.md(f"Loaded **{len(raw_ds)}** raw samples.")
     return (raw_ds,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, raw_ds):
     ds_idx = mo.ui.slider(
         start=0,
@@ -335,14 +337,14 @@ def _(mo, raw_ds):
     return (ds_idx,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     from vlm.data.dataset import parse_ground_truth
 
     return (parse_ground_truth,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(ds_idx, json, parse_ground_truth, raw_ds):
     sample = raw_ds[ds_idx.value]
     image = sample["image"]
@@ -351,7 +353,7 @@ def _(ds_idx, json, parse_ground_truth, raw_ds):
     return image, parsed
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(image):
     # Resize for display; CORD images can be huge.
     w, h = image.size
@@ -364,7 +366,7 @@ def _(image):
     return (display_img,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(display_img, json, mo, parsed):
     img_panel = mo.image(display_img, alt="receipt")
 
@@ -389,7 +391,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(Path):
     runs_root = Path("training_runs")
 
@@ -401,19 +403,19 @@ def _(Path):
     return list_runs, runs_root
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(list_runs, mo):
     available_runs = list_runs()
     run_picker = mo.ui.dropdown(
         options=available_runs,
-        value="b4_e25_drop05" if "b4_e25_drop05" in available_runs else (available_runs[0] if available_runs else None),
+        value="b4_stable_short" if "b4_stable_short" in available_runs else (available_runs[0] if available_runs else None),
         label="run",
     )
     run_picker
     return available_runs, run_picker
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(run_picker, runs_root):
     selected_run = run_picker.value
     if selected_run is None:
@@ -428,7 +430,7 @@ def _(run_picker, runs_root):
     return results_dir, rl_dir, sft_dir
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(Path):
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -465,14 +467,14 @@ def _(Path):
     return (load_all_scalars,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(load_all_scalars, rl_dir, sft_dir):
     sft_scalars = load_all_scalars(sft_dir)
     rl_scalars = load_all_scalars(rl_dir)
     return rl_scalars, sft_scalars
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(pd):
     import altair as alt
 
@@ -505,7 +507,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, sft_scalars):
     sft_tags_all = sorted(sft_scalars.keys())
     sft_tag_picker = mo.ui.multiselect(
@@ -517,7 +519,7 @@ def _(mo, sft_scalars):
     return (sft_tag_picker,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(line_chart, scalars_to_df, sft_scalars, sft_tag_picker):
     sft_selected = sft_tag_picker.value
     sft_df = scalars_to_df({t: sft_scalars[t] for t in sft_selected})
@@ -586,7 +588,7 @@ def _(available_runs, mo):
     return compare_runs, compare_stage, compare_tag_substring
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     alt,
     compare_runs,
@@ -634,12 +636,16 @@ def _(
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(mo):
     mo.md("""
     ## 6. Results
 
-    Summary metrics and per-sample comparison. Export with:
+    Summary metrics and per-sample comparison for the selected run. The submitted
+
+    The main comparison should be read as evidence, not only as a leaderboard:
+    SFT already solves strict JSON formatting well, while RL tests whether the
+    reward can improve grounded content without breaking format.
     """)
     return
 
@@ -695,6 +701,37 @@ def _(comparison, mo, pd):
         eval_table = pd.DataFrame(table_rows)
 
     eval_table
+    return
+
+
+@app.cell
+def _(comparison, mo):
+    if comparison is None:
+        interpretation = mo.md("_no eval comparison loaded_")
+    else:
+        sft_m_ = comparison.get("sft", {})
+        rl_m_ = comparison.get("rl", {})
+        interpretation = mo.md(
+            f"""
+            ### Result interpretation
+
+            For the final `b4_stable_short` run, SFT already reaches high JSON/schema
+            reliability. RL is therefore judged mainly by content and hallucination
+            behavior, not by whether it can make JSON parse.
+
+            - SFT format adherence: **{sft_m_.get('format_adherence_rate', 0):.1%}**
+            - RL format adherence: **{rl_m_.get('format_adherence_rate', 0):.1%}**
+            - SFT mean reward: **{sft_m_.get('mean_reward', 0):.3f}**
+            - RL mean reward: **{rl_m_.get('mean_reward', 0):.3f}**
+
+            In the latest held-out evaluation, RL maintained format adherence and
+            slightly improved key coverage, but it did **not** improve total match,
+            value accuracy, extra-key rate, or mean reward. This supports the main
+            conclusion: once SFT has learned strict JSON, projector-only RL has limited
+            ability to fix weak visual grounding.
+            """
+        )
+    interpretation
     return
 
 
@@ -822,7 +859,7 @@ def _(mo, rl_samples, sample_picker, sft_samples):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ## 8. Design decisions
@@ -833,24 +870,22 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### Vision encoder: Donut over CLIP/SigLIP
+    ### Vision encoder:
 
     Donut is pretrained on document images with a text-decoding objective.
-    At the same parameter scale CLIP/SigLIP encode for object semantics — the
-    wrong inductive bias for dense receipt text. Picked Donut for its CORD
-    fine-tune; dropped the BART decoder, kept only the encoder.
+    Picked Donut because it was finetuned on CORD v2 dataset; dropped the BART decoder, kept only the encoder.
 
     Image processor's resize is overridden to 960×640 — default Donut targets
     ~2560×1920 and produces ~4800 visual tokens, blowing past TinyLlama's
-    context window.
+    context window. Plus computational cost will be quite high.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ### CORD-native schema: verbatim keys
@@ -859,39 +894,31 @@ def _(mo):
     `price`, `sub_total`, `total_price`, `cashprice`, etc.) with no renaming.
     Every field visible on the receipt maps to a target token.
 
-    Renaming or dropping fields introduces "ignore this visible region" signal.
-    If the receipt shows a service charge but the schema has no place for it,
-    the model learns to suppress that visual signal — weakening grounding across
-    all samples, not just ones with service charges.
 
-    **Alternative explored:** flat schema `{line_items, total}`. Easier to
-    learn (100% format adherence in 15 epochs vs 4% for the full CORD schema),
-    but trains the model to ignore 60-70% of visible receipt content. Not the
-    right design for a digitization task.
+    **Alternative considered:** flattening to `{line_items, total}` would make
+    the schema easier, but it would also discard visible fields such as taxes,
+    subtotals, payment details, and item modifiers. For a digitization task, the
+    native CORD schema is a better test of whether the model is grounded in the
+    receipt image.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ### Projector: MLP + LayerNorm
 
     Two-layer MLP from `vis_dim` to `2 × llm_dim` to `llm_dim`, with output
-    LayerNorm. The LayerNorm was added after early runs where the LM ignored
-    the visual prefix entirely — pre-norm outputs sat at magnitudes the frozen
-    LM attention didn't react to.
+    LayerNorm. Layer normalization layer helps with the normalization of magnitude for the LLM.
 
     **Alternative tried:** cross-attention resampler with 64 learned queries
-    (~92M trainable params vs 12M for MLP). Val loss climbed from epoch 7 — a
-    128,000:1 parameter-to-sample ratio on 720 receipts. The attention queries
-    learn sample-specific visual fingerprints rather than generalizable patterns.
-    Bridge capacity is not the bottleneck; the MLP stayed.
+    (~92M trainable params vs 12M for MLP). Assignment constrainsts (computational expense) led to the choice of MLP
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ### Language model: TinyLlama
@@ -909,58 +936,51 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### Reward: dynamic per-key grading
+    ### Reward: content-first grading
 
-    The content reward walks the GT recursively, scoring only keys present in
-    that sample's GT. Money fields use tolerant numeric match. Text fields use
-    token overlap. Score = coverage × value_accuracy.
+    Earlier reward versions over-weighted format and schema, which made valid-looking
+    JSON too rewarding even when values were weakly grounded. The final reward makes
+    format/schema small bonuses and gates, while content carries the main signal.
 
-    **Hallucination penalty distinguishes misplaced from invented:**
-    - Truly extra leaf key (invented name or wrong value): -0.02 each
-    - Misplaced leaf key (right key+value, wrong section): -0.01 each
-    - Truly fabricated section: -0.05 per section
-    - Misplaced section (content mostly matches GT): -0.02 per section
-    - Text value penalty: -0.03 × (1 - token_overlap), cap -0.15
+    Content is scored dynamically against the GT for that receipt:
 
-    **Designed but not yet applied for submitted run:** penalty-only format/schema
-    (0 for correct, negative for broken) with content budget raised to 0.70.
-    When SFT solves format, all K=4 rollouts score identically — zero variance,
-    zero gradient signal. Penalty-only removes that dead weight. Implemented in
-    `rewards.py`, ready for the next run.
+    - `total` fields receive high weight, especially `total_price`.
+    - `menu` is matched approximately by item name and price rather than strict index.
+    - other visible fields are scored through recursive leaf matching.
+    - text uses token F1, not recall-only overlap, so extra junk is penalized.
+    - numeric/money values use tolerant numeric matching.
+
+    Hallucination penalties apply to extra sections, extra leaf keys, duplicate or
+    unmatched menu items, leaked role tokens, and repeated-character garbage.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### Training: batch size and dropout
+    ### Training: batch size, dropout, and checkpoint choice
 
-    Batch 4 (no gradient accumulation) outperformed larger effective batches.
-    With ~690 training samples, smaller batches do ~4× more optimizer steps
-    per epoch. Tried batch 4 with grad_accum_steps=4 (effective batch 16) —
-    slower convergence, no better val loss.
+    Batch 4 (no gradient accumulation) learned the projector alignment faster than
+    larger effective batches in this small-data setting. The tradeoff is that it can
+    move into memorization after the useful SFT window, so the run saves checkpoints
+    and evaluates deterministic generations rather than trusting loss alone.
 
-    **Dropout and RL stability:** No-dropout (`b4_e25_nodrop`) reaches a stronger
-    SFT (100% format, reward 0.777) but RL degrades it — the model is too close
-    to the reward ceiling, most K=4 rollouts are identical, near-zero advantage
-    variance means only noisy updates fire.
+    Dropout in the projector helps keep the SFT solution less sharp. Larger effective
+    batches were smoother, but learned more slowly and did not produce better held-out
+    generations in the same time budget.
 
-    Dropout 0.05 (`b4_e25_drop05`, submitted) produces a slightly weaker SFT
-    (92% format, reward 0.759) but with more headroom for RL to improve. RL
-    consistently improved reward, coverage, and hallucination control on this
-    starting point.
-
-    The right SFT for RL isn't the best SFT — it's the one with enough variance
-    in rollout quality for GRPO to compute meaningful advantages.
+    The important practical lesson is not "batch 4 is always best"; it is that with
+    frozen base models and a small dataset, checkpoint selection should consider
+    generated JSON quality, total matching, hallucinations, and validation loss together.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     ### RL: GRPO with PPO clipping, ppo_epochs=1
@@ -968,41 +988,35 @@ def _(mo):
     The loop implements the clipped PPO surrogate with snapshotted old log-probs.
     At `ppo_epochs=1` clipping is a no-op. Tried `ppo_epochs=4` — no improvement.
 
-    **What worked (`b4_e25_drop05`):** EMA climbed from ~0.76 to ~0.78 over
-    500 steps. Format/schema penalties stayed near zero — RL didn't break SFT's
-    structure. Content component carried the signal. Hallucinated keys reduced
-    (1.56→1.44). RL improved reward, coverage, and full structure score.
+    Step-based EMA-reward checkpointing. JSON/schema rates are logged with the
+    same parser used by the reward function, while reward components show whether
+    RL is improving content or merely preserving format.
 
-    **What didn't (`b4_e25_nodrop`):** EMA declined from step 1 (~0.93→0.82).
-    Best checkpoint saved in the first 20 steps. ~35-40% of steps skipped
-    (identical rewards). Policy loss near zero and sometimes negative — the
-    model barely updated, and when it did the updates were noisy. Root cause:
-    SFT reward 0.777 too close to ceiling, all K=4 rollouts near-identical.
-
-    **The lesson:** GRPO needs variance between rollouts to compute meaningful
-    group-relative advantages. A near-perfect SFT produces uniform rollouts —
-    zero variance, zero signal. A moderate SFT produces varied rollouts — actual
-    gradient signal for RL to work with.
+    In the final evaluation, RL maintained the 98% format adherence achieved by
+    SFT and slightly increased key coverage, but it did not improve mean held-out
+    reward. That is the main post-training finding: RL is a useful alignment loop,
+    but when the SFT model already outputs valid JSON, the remaining bottleneck is
+    visual grounding rather than formatting.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### What worked / what didn't
+    ### What didn't work / wasn't enough
 
-    **Worked:**
-    - Aspect ratio fix (960×640) — single largest improvement: total match 30%→60%+
-    - Penalty-only format/schema reward — freed budget for content, better RL signal
-    - Misplaced vs invented distinction in hallucination penalty — fairer grading
-    - Moderate SFT + RL (`b4_e25_drop05`): RL improved reward, coverage, structure
-    - EMA-reward checkpointing — preserved best policy before late-run noise
+    - **Visual grounding is the ceiling.** The frozen LM cannot learn new attention
+      behavior over visual tokens. The projector can only map image features into
+      a subspace the frozen LM already knows how to use.
+    - **RL is not a substitute for grounding.** If SFT completions are plausible but
+      visually wrong, RL mostly chooses among plausible wrong receipts.
+    - **Better language priors are not enough.** The frozen LM did not help with grasping the visual information very well.
 
-
-
-    **Real fix:** LoRA on LM attention layers. Lets the LM actually learn to
-    attend to the visual prefix instead of approximating through a frozen bottleneck.
+    Real fix: LoRA on LM attention layers. A small number of trainable attention
+    parameters would let the LM actually learn to attend to the visual prefix. That
+    is out of scope for the projector-only assignment, but it is the most likely
+    next improvement. Plus hyperparameter tuning
     """)
     return
 

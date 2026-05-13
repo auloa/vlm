@@ -298,16 +298,16 @@ Additional metrics:
 
 ## Results: SFT vs RL on 50 held-out test receipts
 
-| Metric | SFT | RL | Change |
-|---|---:|---:|---:|
-| Strict JSON rate | 98.0% | 98.0% | +0.0 |
-| Format adherence rate | 98.0% | 98.0% | +0.0 |
-| Mean full structure score | 95.8% | 95.1% | -0.7 pp |
-| Total match rate | 54.0% | 52.0% | -2.0 pp |
-| Mean key coverage | 84.4% | 87.0% | +2.6 pp |
-| Mean value accuracy | 66.7% | 64.1% | -2.6 pp |
-| Mean extra keys | 1.22 | 1.52 | +0.30 |
-| Mean reward | 0.541 | 0.519 | -0.022 |
+| Metric | SFT |    RL |  Change |
+|---|---:|------:|--------:|
+| Strict JSON rate | 98.0% | 98.0% |    +0.0 |
+| Format adherence rate | 98.0% | 98.0% |    +0.0 |
+| Mean full structure score | 95.8% |   96% | +0.3 pp |
+| Total match rate | 54.0% | 46.0% |  8.0 pp |
+| Mean key coverage | 84.4% | 86.8% | +2.4 pp |
+| Mean value accuracy | 66.7% | 62.5% | -4.2 pp |
+| Mean extra keys | 1.22 |  1.46 |  +0.240 |
+| Mean reward | 0.541 | 0.514 |  -0.027 |
 
 ### Interpretation
 
@@ -315,7 +315,7 @@ SFT solved the strict JSON/schema requirement well: both SFT and RL reach **98% 
 
 This is useful evidence rather than a failure of the pipeline: once SFT already produces valid JSON, the remaining bottleneck is visual grounding. With both the vision encoder and LLM frozen, RL can only select among the behaviors the projector already makes available. It cannot fully teach the frozen LLM to read small receipt text or attend differently to visual tokens.
 
-The final recommendation from these experiments is to treat RL as a light polishing stage only after SFT is visibly grounded. For production-quality extraction, unfreezing small LoRA adapters in the LLM attention layers would likely help more than more projector-only RL.
+Finetuning of the reward design and hyperparameters could potentially improve the RL stage.
 
 ---
 

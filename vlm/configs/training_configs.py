@@ -153,9 +153,9 @@ def b4_stable_short(name: str) -> TrainingConfig:
     cfg.sft.grad_clip_norm = 0.5
     cfg.projector.dropout = None
 
-    cfg.rl.learning_rate = 5e-6
-    cfg.rl.kl_coef = 0.20
-    cfg.rl.max_steps = 300
+    cfg.rl.learning_rate = 3e-6
+    cfg.rl.kl_coef = 0.10
+    cfg.rl.max_steps = 200
     cfg.rl.epochs = 1
 
     return cfg
@@ -174,54 +174,6 @@ def b32_e15_drop_01(name: str) -> TrainingConfig:
     cfg.projector.dropout = 0.1
     cfg.rl.kl_coef = 0.2
 
-    return cfg
-
-@register_config
-def b4_e17_drop05(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (17) with dropout.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 17
-    cfg.sft.grad_accum_steps = 1
-    cfg.projector.dropout = 0.05
-    return cfg
-
-@register_config
-def b4_e25_drop05(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (25) with dropout.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 25
-    cfg.sft.grad_accum_steps = 1
-    cfg.projector.dropout = 0.05
-    return cfg
-
-@register_config
-def b4_e17_drop05_dup(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (17) with dropout.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 17
-    cfg.sft.grad_accum_steps = 1
-    cfg.projector.dropout = 0.05
-    return cfg
-
-@register_config
-def b4_e25_tight(name: str) -> TrainingConfig:
-    """
-    More SFT epochs (27) with dropout with tight kl constraint.
-    """
-    cfg = _base_receipt_config(name)
-    cfg.sft.batch_size = 4
-    cfg.sft.epochs = 25
-    cfg.sft.grad_accum_steps = 1
-    cfg.rl.kl_coef = 0.2
     return cfg
 
 
