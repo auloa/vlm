@@ -114,8 +114,7 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 |---|---|
 | `debug` | Full pipeline on 20 samples — environment check |
 | `base` | Baseline — batch 4, dropout 0.15, default settings |
-| `b4_e25_nodrop` | 17 SFT epochs, no dropout, tight RL (KL 0.20) — strong SFT, RL degrades format |
-| `b4_stable_short` | 17 SFT epochs, dropout 0.05, default RL — submitted model, RL improves over SFT |
+| 'b4_stable_short` | Submission config |
 
 > For full training curves, per-sample predictions, and design decision analysis see the interactive walkthrough:
 > ```bash
