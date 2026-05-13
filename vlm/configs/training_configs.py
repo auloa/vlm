@@ -153,9 +153,9 @@ def b4_stable_short(name: str) -> TrainingConfig:
     cfg.sft.grad_clip_norm = 0.5
     cfg.projector.dropout = None
 
-    cfg.rl.learning_rate = 3e-6
-    cfg.rl.kl_coef = 0.10
-    cfg.rl.max_steps = 100
+    cfg.rl.learning_rate = 5e-6
+    cfg.rl.kl_coef = 0.20
+    cfg.rl.max_steps = 300
     cfg.rl.epochs = 1
 
     return cfg
