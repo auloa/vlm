@@ -16,8 +16,8 @@ def _(mo):
     mo.md("""
     # vlm — walkthrough
 
-    A guided tour of the submission. Reads artifacts produced by `train_sft`,
-    `train_rl`, and `evaluate` and renders them inline.
+    A walk through the components of the pipeline, along with discussion on the components.
+    We will also go over the artifacts created by these modules `train_sft`, `train_rl`, and `evaluate`.
 
     **Sections:**
     1. Architecture overview
@@ -28,6 +28,7 @@ def _(mo):
     6. Eval results
     7. Per-sample inspector
     8. Design decisions (retrospective)
+    9. conclusion
     """)
     return
 
@@ -163,17 +164,8 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    load_model_btn = mo.ui.run_button(label="Load model & run forward pass")
-    load_model_btn
-    return (load_model_btn,)
-
-
 @app.cell
-def _(load_model_btn, mo):
-    mo.stop(not load_model_btn.value, mo.md("_press the button to load_"))
-
+def _():
     import torch
     from vlm.models.receipt_vlm import ReceiptVLM
     from vlm.training.common import build_instruction, prepare_tokenizer
@@ -200,9 +192,7 @@ def _(load_model_btn, mo):
 
 
 @app.cell
-def _(image, instruction, load_model_btn, mo, model, tokenizer, torch):
-    mo.stop(not load_model_btn.value)
-
+def _(image, instruction, mo, model, tokenizer, torch):
     # Encode the currently-selected dataset image.
     with torch.no_grad():
         visual_features = model.vision_encoder([image])
@@ -237,9 +227,7 @@ def _(image, instruction, load_model_btn, mo, model, tokenizer, torch):
 
 
 @app.cell
-def _(full_attn, inputs_embeds, load_model_btn, mo, model, tokenizer, torch):
-    mo.stop(not load_model_btn.value)
-
+def _(full_attn, inputs_embeds, mo, model, tokenizer, torch):
     # Generate a short completion to demonstrate the inputs_embeds path works end-to-end.
     with torch.no_grad():
         out = model.lm.model.generate(
@@ -274,9 +262,7 @@ def _(mo):
 
 
 @app.cell
-def _(load_model_btn, mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
-    mo.stop(not load_model_btn.value)
-
+def _(mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
     import json as _json_mask
 
     # Tokenize the target JSON the way the SFT collator does.
@@ -300,35 +286,14 @@ def _(load_model_btn, mo, parsed, prompt_ids, tokenizer, torch, visual_embeds):
         f"**Sequence breakdown:**\n\n"
         f"| Region | Token positions | Length | In loss? |\n"
         f"|---|---|---|---|\n"
-        f"| Visual prefix | `0 … {visual_len - 1}` | {visual_len} | ❌ masked |\n"
-        f"| Instruction prompt | `{visual_len} … {visual_len + prompt_len - 1}` | {prompt_len} | ❌ masked |\n"
-        f"| Target JSON | `{visual_len + prompt_len} … {total_len - 1}` | {target_len} | ✅ contributes |\n\n"
+        f"| Visual prefix | `0 … {visual_len - 1}` | {visual_len} |  masked |\n"
+        f"| Instruction prompt | `{visual_len} … {visual_len + prompt_len - 1}` | {prompt_len} | masked |\n"
+        f"| Target JSON | `{visual_len + prompt_len} … {total_len - 1}` | {target_len} | contributes |\n\n"
         f"**Loss-contributing tokens:** {contributing} / {total_len} "
         f"({100 * contributing / total_len:.1f}%) — the rest is `-100`.\n\n"
         f"**Target string ({target_len} tokens):**\n\n"
         f"```json\n{target_str[:500]}{'...' if len(target_str) > 500 else ''}\n```"
     )
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md("""
-    ### Why this masking matters
-
-    - **Visual prefix masked:** the LM never predicts visual positions — those
-      are inputs, not outputs. Including them in the loss would push the LM
-      to generate visual-embedding-shaped vectors as text, which is nonsense.
-    - **Instruction masked:** the prompt is conditioning context, not something
-      the model needs to learn to reproduce. Including it would waste capacity
-      on memorizing the fixed instruction string.
-    - **Target unmasked:** the model learns to predict JSON tokens
-      autoregressively given visual + prompt context. This is the only part
-      where gradients flow.
-
-    The cross-entropy is taken over the visible target tokens only, scaled
-    by their count. Empty/missing targets produce zero loss for that sample.
-    """)
     return
 
 
@@ -441,7 +406,7 @@ def _(list_runs, mo):
     available_runs = list_runs()
     run_picker = mo.ui.dropdown(
         options=available_runs,
-        value="tlama_sp_n_accum_bs_4_drp" if "tlama_sp_n_accum_bs_4_drp" in available_runs else (available_runs[0] if available_runs else None),
+        value="b4_e25_drop05" if "b4_e25_drop05" in available_runs else (available_runs[0] if available_runs else None),
         label="run",
     )
     run_picker
@@ -675,9 +640,6 @@ def _(mo):
     ## 6. Results
 
     Summary metrics and per-sample comparison. Export with:
-    ```bash
-    marimo export html walkthrough.py -o results.html
-    ```
     """)
     return
 
@@ -698,7 +660,7 @@ def _(json, mo, results_dir):
             comparison_msg = mo.md(f"`{comparison_path}` not found — run `evaluate.py`.")
 
     comparison_msg
-    return comparison, comparison_path, comparison_msg
+    return (comparison,)
 
 
 @app.cell(hide_code=True)
@@ -733,12 +695,14 @@ def _(comparison, mo, pd):
         eval_table = pd.DataFrame(table_rows)
 
     eval_table
-    return comparison_msg, eval_table, metric_rows, rl_m, sft_m, table_rows
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("### Per-sample delta: SFT → RL")
+    mo.md("""
+    ### Per-sample delta: SFT → RL
+    """)
     return
 
 
@@ -756,7 +720,7 @@ def _(json, results_dir):
     else:
         sft_samples = _load_jsonl(results_dir / "eval_sft" / "samples.jsonl")
         rl_samples = _load_jsonl(results_dir / "eval_rl" / "samples.jsonl")
-    return _load_jsonl, rl_samples, sft_samples
+    return rl_samples, sft_samples
 
 
 @app.cell(hide_code=True)
@@ -799,12 +763,14 @@ def _(mo, pd, rl_samples, sft_samples):
             {"category": "Lost full_structure (>5%)", "count": _fs_lost},
         ])
     delta_table
-    return delta_table, rl_samples, sft_samples
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("## 7. Per-sample inspector")
+    mo.md("""
+    ## 7. Per-sample inspector
+    """)
     return
 
 
@@ -853,7 +819,7 @@ def _(mo, rl_samples, sample_picker, sft_samples):
             f"```json\n{_rl.get('prediction', '')}\n```"
         )
     view
-    return (view,)
+    return
 
 
 @app.cell
@@ -948,17 +914,22 @@ def _(mo):
     mo.md("""
     ### Reward: dynamic per-key grading
 
-    The content reward walks the GT structure recursively and scores only keys
-    present in that sample's GT. Money fields use tolerant numeric match (strip
-    separators). Text fields use token overlap. Score = coverage × value_accuracy.
+    The content reward walks the GT recursively, scoring only keys present in
+    that sample's GT. Money fields use tolerant numeric match. Text fields use
+    token overlap. Score = coverage × value_accuracy.
 
-    This means: adding new fields to the parser changes what gets scored without
-    touching the reward function. A model producing extra keys is penalized.
-    No static key list to maintain.
+    **Hallucination penalty distinguishes misplaced from invented:**
+    - Truly extra leaf key (invented name or wrong value): -0.02 each
+    - Misplaced leaf key (right key+value, wrong section): -0.01 each
+    - Truly fabricated section: -0.05 per section
+    - Misplaced section (content mostly matches GT): -0.02 per section
+    - Text value penalty: -0.03 × (1 - token_overlap), cap -0.15
 
-    Final weights: format 0.30 / schema 0.30 / content 0.40. Format and schema
-    weighted heavily because with the richer CORD-native schema the model needs
-    strong structural signal to maintain JSON shape during RL.
+    **Designed but not yet applied for submitted run:** penalty-only format/schema
+    (0 for correct, negative for broken) with content budget raised to 0.70.
+    When SFT solves format, all K=4 rollouts score identically — zero variance,
+    zero gradient signal. Penalty-only removes that dead weight. Implemented in
+    `rewards.py`, ready for the next run.
     """)
     return
 
@@ -968,18 +939,23 @@ def _(mo):
     mo.md("""
     ### Training: batch size and dropout
 
-    Batch 4 (no gradient accumulation) outperformed larger effective batch sizes
-    on val loss minimum. With ~720 training samples and 15 epochs, smaller batches
-    do ~4× more optimizer steps per epoch — larger batches don't converge within
-    the same epoch budget.
+    Batch 4 (no gradient accumulation) outperformed larger effective batches.
+    With ~690 training samples, smaller batches do ~4× more optimizer steps
+    per epoch. Tried batch 4 with grad_accum_steps=4 (effective batch 16) —
+    slower convergence, no better val loss.
 
-    Dropout (p=0.1) in the projector prevents late-epoch val loss from climbing.
-    Without dropout: val bottoms at epoch 9 then rises (overfitting). With dropout:
-    val stays flat or keeps declining — a flatter, more RL-stable minimum.
+    **Dropout and RL stability:** No-dropout (`b4_e25_nodrop`) reaches a stronger
+    SFT (100% format, reward 0.777) but RL degrades it — the model is too close
+    to the reward ceiling, most K=4 rollouts are identical, near-zero advantage
+    variance means only noisy updates fire.
 
-    The dropout run trains more slowly — at epoch 15 it's still converging.
-    The richer CORD-native schema needs more epochs than 15 to fully converge
-    with dropout. This is the primary limitation of the submitted model.
+    Dropout 0.05 (`b4_e25_drop05`, submitted) produces a slightly weaker SFT
+    (92% format, reward 0.759) but with more headroom for RL to improve. RL
+    consistently improved reward, coverage, and hallucination control on this
+    starting point.
+
+    The right SFT for RL isn't the best SFT — it's the one with enough variance
+    in rollout quality for GRPO to compute meaningful advantages.
     """)
     return
 
@@ -992,14 +968,21 @@ def _(mo):
     The loop implements the clipped PPO surrogate with snapshotted old log-probs.
     At `ppo_epochs=1` clipping is a no-op. Tried `ppo_epochs=4` — no improvement.
 
-    Step-based EMA-reward checkpointing. Format and schema components stay near
-    their maximums throughout — RL maintains what SFT built. Content component
-    carries the actual RL signal. Best-EMA checkpoint captures the early peak.
+    **What worked (`b4_e25_drop05`):** EMA climbed from ~0.76 to ~0.78 over
+    500 steps. Format/schema penalties stayed near zero — RL didn't break SFT's
+    structure. Content component carried the signal. Hallucinated keys reduced
+    (1.56→1.44). RL improved reward, coverage, and full structure score.
 
-    Note: earlier runs showed low RL improvement from a 4% SFT baseline. This
-    was caused by an evaluation bug — `build_instruction` was not called during
-    eval, so the model saw a different prompt at eval time than training. With
-    the fix, SFT (no-dropout) reaches 98% format adherence before RL even starts.
+    **What didn't (`b4_e25_nodrop`):** EMA declined from step 1 (~0.93→0.82).
+    Best checkpoint saved in the first 20 steps. ~35-40% of steps skipped
+    (identical rewards). Policy loss near zero and sometimes negative — the
+    model barely updated, and when it did the updates were noisy. Root cause:
+    SFT reward 0.777 too close to ceiling, all K=4 rollouts near-identical.
+
+    **The lesson:** GRPO needs variance between rollouts to compute meaningful
+    group-relative advantages. A near-perfect SFT produces uniform rollouts —
+    zero variance, zero signal. A moderate SFT produces varied rollouts — actual
+    gradient signal for RL to work with.
     """)
     return
 
@@ -1007,21 +990,19 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md("""
-    ### What didn't work / wasn't enough
+    ### What worked / what didn't
 
-    - **Visual grounding is the ceiling.** Frozen LM can't learn to attend to
-      visual tokens. The projector must find the one subspace of the frozen LM's
-      embedding space where frozen attention happens to respond — can't teach the
-      LM to attend, only approximate grounding through a fixed bottleneck.
-    - **Resampler overfits aggressively.** 92M params on 720 samples. Stopped
-      early, no useful checkpoint.
-    - **Qwen didn't fix grounding.** Better prior, same bottleneck.
-    - **RL on no-dropout SFT degraded every metric.** Sharp SFT minimum +
-      noisy RL advantages = policy destabilization. Dropout checkpoint is more
-      RL-stable even at lower absolute performance.
+    **Worked:**
+    - Aspect ratio fix (960×640) — single largest improvement: total match 30%→60%+
+    - Penalty-only format/schema reward — freed budget for content, better RL signal
+    - Misplaced vs invented distinction in hallucination penalty — fairer grading
+    - Moderate SFT + RL (`b4_e25_drop05`): RL improved reward, coverage, structure
+    - EMA-reward checkpointing — preserved best policy before late-run noise
 
-    Real fix: LoRA on LM attention layers. 2-4M params, lets the LM actually
-    learn to attend to the visual prefix. Out of scope for this assignment.
+
+
+    **Real fix:** LoRA on LM attention layers. Lets the LM actually learn to
+    attend to the visual prefix instead of approximating through a frozen bottleneck.
     """)
     return
 

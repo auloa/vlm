@@ -4,6 +4,7 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+
 from vlm.configs.training_schema import RLConfig, TrainingConfig
 from vlm.data.dataset import CORDDataset
 from vlm.models.receipt_vlm import ReceiptVLM
@@ -22,6 +23,7 @@ from vlm.training.rl_utils import (
     compute_grpo_loss,
 )
 from vlm.utils.device import get_device
+from vlm.utils.json_extractor import parse_json_object
 from vlm.utils.training import get_autocast, set_seed
 
 
@@ -61,19 +63,19 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
         projector_dropout=projector_cfg.dropout,
     )
 
-    # Always start from SFT best checkpoint as the base weights.
     ckpt = torch.load(cfg.sft_best_checkpoint, map_location=device)
     model.projector.load_state_dict(ckpt["projector_state_dict"])
     print(f"loaded SFT checkpoint: {cfg.sft_best_checkpoint}")
 
     set_projector_only_trainable(model)
 
-    # Frozen SFT projector used as KL/reference policy.
+    # Frozen SFT projector as KL/reference policy.
     ref_projector = clone_reference_projector(model.projector)
 
     print("loading dataset...")
     tokenizer = prepare_tokenizer(model.lm.tokenizer)
     instruction = build_instruction(tokenizer, model_cfg.instruction)
+
     dataset = CORDDataset(
         split=data.train_split,
         max_samples=data.train_samples,
@@ -104,7 +106,6 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
     steps_since_improvement = 0
     stop_training = False
 
-    # ── Resume ──────────────────────────────────────────────────────────
     if resume:
         rl_ckpt_path = Path(cfg.rl_best_checkpoint)
         if not rl_ckpt_path.exists():
@@ -112,8 +113,6 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
         else:
             print(f"[resume] loading {rl_ckpt_path}")
             rl_ckpt = torch.load(rl_ckpt_path, map_location=device)
-            # Overwrite projector weights with the RL checkpoint
-            # (SFT weights loaded above are replaced here).
             model.projector.load_state_dict(rl_ckpt["projector_state_dict"])
             optimizer.load_state_dict(rl_ckpt["optimizer_state_dict"])
             global_step = rl_ckpt.get("step", 0)
@@ -123,7 +122,6 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 f"[resume] step {global_step} | "
                 f"best ema reward {best_ema_reward:.4f}"
             )
-    # ────────────────────────────────────────────────────────────────────
 
     with SummaryWriter(log_dir=str(cfg.rl_run_dir)) as writer:
         log_text(writer, "rl/log", f"device: {device}", step=0)
@@ -133,6 +131,9 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 break
 
             model.projector.train()
+            model.vision_encoder.eval()
+            model.lm.model.eval()
+
             epoch_rewards: list[float] = []
 
             print(f"\nepoch {epoch + 1}/{rl.epochs}")
@@ -146,7 +147,7 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 image = sample["image"][0]
                 ground_truth = sample["label"][0]
 
-                # 1. Generate K completions from the current policy.
+                # 1. Generate K completions from current policy.
                 model.projector.eval()
 
                 with torch.no_grad():
@@ -164,10 +165,7 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 model.projector.train()
 
                 # 2. Compute rewards.
-                breakdowns = [
-                    compute_reward(text, ground_truth)
-                    for text in gen.texts
-                ]
+                breakdowns = [compute_reward(text, ground_truth) for text in gen.texts]
 
                 rewards = torch.tensor(
                     [b.total for b in breakdowns],
@@ -182,20 +180,32 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 reward_std = rewards.std(unbiased=False)
                 advantages = (rewards - reward_mean) / (reward_std + 1e-8)
 
-                # If all completions receive the same reward, there is no
-                # useful preference signal for this image.
-                if torch.allclose(
+                identical_rewards = torch.allclose(
                     advantages,
                     torch.zeros_like(advantages),
                     atol=1e-6,
-                ):
+                )
+
+                if identical_rewards:
                     global_step += 1
 
-                    ema_reward, best_ema_reward, best_ema_for_stopping, steps_since_improvement, stop_training = _step_bookkeeping(
-                        model=model, optimizer=optimizer, writer=writer, cfg=cfg, rl=rl,
-                        epoch=epoch, global_step=global_step,
+                    (
+                        ema_reward,
+                        best_ema_reward,
+                        best_ema_for_stopping,
+                        steps_since_improvement,
+                        stop_training,
+                    ) = _step_bookkeeping(
+                        model=model,
+                        optimizer=optimizer,
+                        writer=writer,
+                        cfg=cfg,
+                        rl=rl,
+                        epoch=epoch,
+                        global_step=global_step,
                         step_reward=rewards.mean().item(),
-                        ema_reward=ema_reward, best_ema_reward=best_ema_reward,
+                        ema_reward=ema_reward,
+                        best_ema_reward=best_ema_reward,
                         best_ema_for_stopping=best_ema_for_stopping,
                         steps_since_improvement=steps_since_improvement,
                     )
@@ -206,6 +216,7 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                             global_step=global_step,
                             rewards=rewards,
                             breakdowns=breakdowns,
+                            generated_texts=gen.texts,
                             policy_loss=None,
                             kl_loss=None,
                             loss=None,
@@ -241,7 +252,7 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                         require_grad=False,
                     )
 
-                # 5. Snapshot old policy log-probs before any gradient step.
+                # 5. Snapshot old policy log-probs before update.
                 with torch.no_grad():
                     old_token_log_probs, _ = compute_completion_token_log_probs(
                         model=model,
@@ -254,8 +265,13 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                         require_grad=False,
                     )
 
-                # 6. PPO inner loop.
+                # 6. PPO/GRPO update.
                 valid_step = True
+                policy_loss = None
+                kl_loss = None
+                loss = None
+                grad_norm = None
+
                 for _ppo_step in range(rl.ppo_epochs):
                     with get_autocast(device):
                         policy_token_log_probs, token_mask = compute_completion_token_log_probs(
@@ -303,11 +319,23 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                 if not valid_step:
                     continue
 
-                ema_reward, best_ema_reward, best_ema_for_stopping, steps_since_improvement, stop_training = _step_bookkeeping(
-                    model=model, optimizer=optimizer, writer=writer, cfg=cfg, rl=rl,
-                    epoch=epoch, global_step=global_step,
+                (
+                    ema_reward,
+                    best_ema_reward,
+                    best_ema_for_stopping,
+                    steps_since_improvement,
+                    stop_training,
+                ) = _step_bookkeeping(
+                    model=model,
+                    optimizer=optimizer,
+                    writer=writer,
+                    cfg=cfg,
+                    rl=rl,
+                    epoch=epoch,
+                    global_step=global_step,
                     step_reward=rewards.mean().item(),
-                    ema_reward=ema_reward, best_ema_reward=best_ema_reward,
+                    ema_reward=ema_reward,
+                    best_ema_reward=best_ema_reward,
                     best_ema_for_stopping=best_ema_for_stopping,
                     steps_since_improvement=steps_since_improvement,
                 )
@@ -319,6 +347,7 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                         global_step=global_step,
                         rewards=rewards,
                         breakdowns=breakdowns,
+                        generated_texts=gen.texts,
                         policy_loss=policy_loss,
                         kl_loss=kl_loss,
                         loss=loss,
@@ -327,11 +356,12 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
                         skipped=False,
                     )
 
-                    writer.add_scalar(
-                        "rl/optim/grad_norm",
-                        float(grad_norm),
-                        global_step,
-                    )
+                    if grad_norm is not None:
+                        writer.add_scalar(
+                            "rl/optim/grad_norm",
+                            float(grad_norm),
+                            global_step,
+                        )
 
                 if global_step % rl.sample_every == 0:
                     _log_sample(
@@ -347,9 +377,13 @@ def train_rl(cfg: TrainingConfig, resume: bool = False) -> None:
 
             mean_epoch_reward = sum(epoch_rewards) / max(1, len(epoch_rewards))
             writer.add_scalar("rl/epoch_mean_reward", mean_epoch_reward, epoch + 1)
+
+            ema_text = f"{ema_reward:.3f}" if ema_reward is not None else "n/a"
             log_text(
-                writer, "rl/log",
-                f"epoch {epoch + 1} complete | mean reward {mean_epoch_reward:.3f} | ema {ema_reward:.3f}",
+                writer,
+                "rl/log",
+                f"epoch {epoch + 1} complete | "
+                f"mean reward {mean_epoch_reward:.3f} | ema {ema_text}",
                 step=global_step,
             )
 
@@ -370,12 +404,6 @@ def _step_bookkeeping(
     best_ema_for_stopping: float,
     steps_since_improvement: int,
 ) -> tuple[float, float, float, int, bool]:
-    """Update EMA, checkpoint, and check stopping conditions.
-
-    Returns updated (ema_reward, best_ema_reward, best_ema_for_stopping,
-    steps_since_improvement, stop_training).
-    """
-    # EMA update.
     if ema_reward is None:
         ema_reward = step_reward
     else:
@@ -383,30 +411,41 @@ def _step_bookkeeping(
 
     writer.add_scalar("rl/reward/ema", ema_reward, global_step)
 
-    # Save on EMA improvement.
     if ema_reward > best_ema_reward:
         best_ema_reward = ema_reward
+
         _save_rl_checkpoint(
-            model=model, optimizer=optimizer, epoch=epoch, step=global_step,
-            mean_reward=ema_reward, checkpoint_path=cfg.rl_best_checkpoint,
-            completions_per_image=rl.completions_per_image, kl_coef=rl.kl_coef,
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            step=global_step,
+            mean_reward=ema_reward,
+            checkpoint_path=cfg.rl_best_checkpoint,
+            completions_per_image=rl.completions_per_image,
+            kl_coef=rl.kl_coef,
         )
+
         log_text(
-            writer, "rl/log",
+            writer,
+            "rl/log",
             f"checkpoint saved: step {global_step} | ema_reward {ema_reward:.3f}",
             step=global_step,
         )
 
-    # Periodic step checkpoint.
     if global_step % rl.save_every_n_steps == 0:
         step_path = Path(cfg.rl_checkpoint_dir) / f"step_{global_step:06d}.pt"
+
         _save_rl_checkpoint(
-            model=model, optimizer=optimizer, epoch=epoch, step=global_step,
-            mean_reward=ema_reward, checkpoint_path=step_path,
-            completions_per_image=rl.completions_per_image, kl_coef=rl.kl_coef,
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            step=global_step,
+            mean_reward=ema_reward,
+            checkpoint_path=step_path,
+            completions_per_image=rl.completions_per_image,
+            kl_coef=rl.kl_coef,
         )
 
-    # Early stopping.
     if ema_reward > best_ema_for_stopping + rl.early_stop_min_delta:
         best_ema_for_stopping = ema_reward
         steps_since_improvement = 0
@@ -414,13 +453,20 @@ def _step_bookkeeping(
         steps_since_improvement += 1
 
     stop_training = steps_since_improvement >= rl.early_stop_patience
+
     if stop_training:
         print(
             f"early stopping: no EMA improvement > {rl.early_stop_min_delta} "
             f"for {rl.early_stop_patience} steps."
         )
 
-    return ema_reward, best_ema_reward, best_ema_for_stopping, steps_since_improvement, stop_training
+    return (
+        ema_reward,
+        best_ema_reward,
+        best_ema_for_stopping,
+        steps_since_improvement,
+        stop_training,
+    )
 
 
 def _log_metrics(
@@ -428,6 +474,7 @@ def _log_metrics(
     global_step: int,
     rewards: torch.Tensor,
     breakdowns: list[RewardBreakdown],
+    generated_texts: list[str],
     policy_loss: torch.Tensor | None,
     kl_loss: torch.Tensor | None,
     loss: torch.Tensor | None,
@@ -437,56 +484,44 @@ def _log_metrics(
 ) -> None:
     mean_reward = rewards.mean().item()
 
-    mean_format = sum(b.format for b in breakdowns) / max(1, len(breakdowns))
-    mean_schema = sum(b.schema for b in breakdowns) / max(1, len(breakdowns))
-    mean_content = sum(b.content for b in breakdowns) / max(1, len(breakdowns))
-    mean_hallucination = sum(b.hallucination for b in breakdowns) / max(
-        1, len(breakdowns)
-    )
+    mean_format = _mean([b.format for b in breakdowns])
+    mean_schema = _mean([b.schema for b in breakdowns])
+    mean_content = _mean([b.content for b in breakdowns])
+    mean_hallucination = _mean([b.hallucination for b in breakdowns])
 
-    clean_json_rate = sum(
-        b.format >= 0.15 for b in breakdowns
-    ) / max(1, len(breakdowns))
-
-    parseable_or_wrapped_json_rate = sum(
-        b.format >= 0.05 for b in breakdowns
-    ) / max(1, len(breakdowns))
-
-    schema_rate = sum(
-        b.schema >= 0.15 for b in breakdowns
-    ) / max(1, len(breakdowns))
+    json_rate, clean_json_rate, schema_rate = _batch_json_schema_rates(generated_texts)
 
     writer.add_scalar("rl/reward/mean", mean_reward, global_step)
+    writer.add_scalar("rl/reward/json_rate", json_rate, global_step)
     writer.add_scalar("rl/reward/clean_json_rate", clean_json_rate, global_step)
-    writer.add_scalar(
-        "rl/reward/parseable_or_wrapped_json_rate",
-        parseable_or_wrapped_json_rate,
-        global_step,
-    )
     writer.add_scalar("rl/reward/schema_rate", schema_rate, global_step)
 
     writer.add_scalar("rl/reward_components/format", mean_format, global_step)
     writer.add_scalar("rl/reward_components/schema", mean_schema, global_step)
     writer.add_scalar("rl/reward_components/content", mean_content, global_step)
-    writer.add_scalar(
-        "rl/reward_components/hallucination",
-        mean_hallucination,
-        global_step,
-    )
+    writer.add_scalar("rl/reward_components/hallucination", mean_hallucination, global_step)
+
+    writer.add_scalar("rl/update/skipped", float(skipped), global_step)
 
     if skipped:
-        writer.add_scalar("rl/update/skipped", 1.0, global_step)
         print(
             f"step {global_step:4d} | "
             f"batch {step + 1}/{total_steps} | "
             f"reward {mean_reward:.3f} | "
-            f"json {clean_json_rate:.0%} | "
+            f"json {json_rate:.0%} | "
             f"schema {schema_rate:.0%} | "
+            f"format {mean_format:.3f} | "
+            f"schema_bonus {mean_schema:.3f} | "
+            f"content {mean_content:.3f} | "
+            f"hallucination {mean_hallucination:.3f} | "
             f"skipped update: identical rewards"
         )
         return
 
-    writer.add_scalar("rl/update/skipped", 0.0, global_step)
+    assert policy_loss is not None
+    assert kl_loss is not None
+    assert loss is not None
+
     writer.add_scalar("rl/loss/policy", policy_loss.item(), global_step)
     writer.add_scalar("rl/loss/kl", kl_loss.item(), global_step)
     writer.add_scalar("rl/loss/total", loss.item(), global_step)
@@ -495,15 +530,51 @@ def _log_metrics(
         f"step {global_step:4d} | "
         f"batch {step + 1}/{total_steps} | "
         f"reward {mean_reward:.3f} | "
-        f"json {clean_json_rate:.0%} | "
+        f"json {json_rate:.0%} | "
         f"schema {schema_rate:.0%} | "
         f"format {mean_format:.3f} | "
+        f"schema_bonus {mean_schema:.3f} | "
         f"content {mean_content:.3f} | "
         f"hallucination {mean_hallucination:.3f} | "
         f"policy {policy_loss.item():.4f} | "
         f"kl {kl_loss.item():.4f} | "
         f"loss {loss.item():.4f}"
     )
+
+
+def _batch_json_schema_rates(texts: list[str]) -> tuple[float, float, float]:
+    if not texts:
+        return 0.0, 0.0, 0.0
+
+    flags = [_json_schema_flags(text) for text in texts]
+
+    json_rate = _mean([float(f["json_ok"]) for f in flags])
+    clean_json_rate = _mean([float(f["clean_json"]) for f in flags])
+    schema_rate = _mean([float(f["schema_ok"]) for f in flags])
+
+    return json_rate, clean_json_rate, schema_rate
+
+
+def _json_schema_flags(text: str) -> dict[str, bool]:
+    parsed = parse_json_object(text)
+
+    json_ok = parsed is not None
+    clean_json = isinstance(parsed, dict)
+
+    schema_ok = (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("menu"), list)
+        and len(parsed.get("menu")) > 0
+        and isinstance(parsed.get("total"), dict)
+        and parsed.get("total", {}).get("total_price") is not None
+        and str(parsed.get("total", {}).get("total_price")).strip() != ""
+    )
+
+    return {
+        "json_ok": json_ok,
+        "clean_json": clean_json,
+        "schema_ok": schema_ok,
+    }
 
 
 def _log_sample(
@@ -516,18 +587,28 @@ def _log_sample(
     best_idx = rewards.argmax().item()
     worst_idx = rewards.argmin().item()
 
+    best_flags = _json_schema_flags(gen.texts[best_idx])
+    worst_flags = _json_schema_flags(gen.texts[worst_idx])
+
     log_text_str = (
-        f"**ground truth:** {ground_truth[:300]}\n\n"
-        f"**best reward={rewards[best_idx]:.3f}:**\n"
-        f"{gen.texts[best_idx][:500]}\n\n"
-        f"**worst reward={rewards[worst_idx]:.3f}:**\n"
-        f"{gen.texts[worst_idx][:500]}"
+        f"**ground truth:**\n```json\n{ground_truth[:800]}\n```\n\n"
+        f"**best reward={rewards[best_idx]:.3f} "
+        f"| json={best_flags['json_ok']} "
+        f"| schema={best_flags['schema_ok']}:**\n"
+        f"```text\n{gen.texts[best_idx][:800]}\n```\n\n"
+        f"**worst reward={rewards[worst_idx]:.3f} "
+        f"| json={worst_flags['json_ok']} "
+        f"| schema={worst_flags['schema_ok']}:**\n"
+        f"```text\n{gen.texts[worst_idx][:800]}\n```"
     )
 
     writer.add_text("rl/samples", log_text_str, global_step)
 
     print(
-        f"\nbest @ step {global_step} (reward={rewards[best_idx]:.3f}):\n"
+        f"\nbest @ step {global_step} "
+        f"(reward={rewards[best_idx]:.3f}, "
+        f"json={best_flags['json_ok']}, "
+        f"schema={best_flags['schema_ok']}):\n"
         f"  gt:   {ground_truth[:200]}\n"
         f"  pred: {gen.texts[best_idx][:200]}"
     )
@@ -566,3 +647,7 @@ def _rl_collate(batch: list[dict]) -> dict[str, list]:
         "image": [sample["image"] for sample in batch],
         "label": [sample["label"] for sample in batch],
     }
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / max(1, len(values))
