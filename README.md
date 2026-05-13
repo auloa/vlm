@@ -75,6 +75,22 @@ training_runs/b4_stable_short/
     └── eval_comparison.json
 ```
 
+
+### Model test
+```
+# SFT and RL side by side, 10 samples
+uv run python -m vlm.scripts.viz_inference -c b4_stable_short
+
+# Single sample
+uv run python -m vlm.scripts.viz_inference -c b4_stable_short --index 5
+
+# More samples, SFT only
+uv run python -m vlm.scripts.viz_inference -c b4_stable_short --stage sft --n 20
+
+# Custom output path
+uv run python -m vlm.scripts.viz_inference -c b4_stable_short --output results/viz.html```
+
+
 ### Sanity check
 
 ```bash
@@ -99,7 +115,7 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 | `debug` | Full pipeline on 20 samples — environment check |
 | `base` | Baseline — batch 4, dropout 0.15, default settings |
 | `b4_e25_nodrop` | 17 SFT epochs, no dropout, tight RL (KL 0.20) — strong SFT, RL degrades format |
-| `b4_e25_drop05` | 17 SFT epochs, dropout 0.05, default RL — submitted model, RL improves over SFT |
+| `b4_stable_short` | 17 SFT epochs, dropout 0.05, default RL — submitted model, RL improves over SFT |
 
 > For full training curves, per-sample predictions, and design decision analysis see the interactive walkthrough:
 > ```bash
