@@ -160,6 +160,7 @@ def b4_stable_short(name: str) -> TrainingConfig:
 
     return cfg
 
+@register_config
 def b4_stable_short_drop015(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
 
@@ -177,7 +178,7 @@ def b4_stable_short_drop015(name: str) -> TrainingConfig:
     cfg.rl.epochs = 1
 
     return cfg
-
+@register_config
 def b16_stable_short(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
 
@@ -195,7 +196,7 @@ def b16_stable_short(name: str) -> TrainingConfig:
     cfg.rl.epochs = 1
 
     return cfg
-
+@register_config
 def b16_stable_short_ga(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
 
