@@ -160,6 +160,24 @@ def b4_stable_short(name: str) -> TrainingConfig:
 
     return cfg
 
+def b4_stable_short_drop015(name: str) -> TrainingConfig:
+    cfg = _base_receipt_config(name)
+
+    cfg.sft.batch_size = 4
+    cfg.sft.grad_accum_steps = 1
+    cfg.sft.epochs = 15
+    cfg.sft.learning_rate = 5e-5
+    cfg.sft.weight_decay = 0.01
+    cfg.sft.grad_clip_norm = 0.5
+    cfg.projector.dropout = 0.15
+
+    cfg.rl.learning_rate = 3e-6
+    cfg.rl.kl_coef = 0.10
+    cfg.rl.max_steps = 200
+    cfg.rl.epochs = 1
+
+    return cfg
+
 
 @register_config
 def b32_e15_drop_01(name: str) -> TrainingConfig:
