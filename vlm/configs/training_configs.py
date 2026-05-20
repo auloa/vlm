@@ -179,7 +179,7 @@ def b4_stable_short_drop015(name: str) -> TrainingConfig:
 
     return cfg
 @register_config
-def b16_stable_short_ga4(name: str) -> TrainingConfig:
+def b4_stable_short_ga4(name: str) -> TrainingConfig:
     cfg = _base_receipt_config(name)
 
     cfg.sft.batch_size = 4
