@@ -46,9 +46,6 @@ uv run python -m vlm.scripts.train_rl  -c b4_stable_short
 # Evaluate both SFT and RL checkpoints on the held-out test split
 uv run python -m vlm.scripts.evaluate  -c b4_stable_short
 
-# Evaluate one stage explicitly
-uv run python -m vlm.scripts.evaluate  -c b4_stable_short
-
 ```
 
 Outputs are written to:
@@ -88,7 +85,8 @@ uv run python -m vlm.scripts.viz_inference -c b4_stable_short --index 5
 uv run python -m vlm.scripts.viz_inference -c b4_stable_short --stage sft --n 20
 
 # Custom output path
-uv run python -m vlm.scripts.viz_inference -c b4_stable_short --output results/viz.html```
+uv run python -m vlm.scripts.viz_inference -c b4_stable_short --output results/viz.html
+```
 
 
 ### Sanity check
@@ -114,7 +112,7 @@ Then run with `-c my_run`. The config name becomes the directory under `training
 |---|---|
 | `debug` | Full pipeline on 20 samples — environment check |
 | `base` | Baseline — batch 4, dropout 0.15, default settings |
-| 'b4_stable_short` | Submission config |
+| `b4_stable_short` | Submission config |
 
 **Key config fields (Defaults):**
 
@@ -228,19 +226,19 @@ Final run dataset statistics:
 
 SFT teaches the projector to condition the frozen LLM on receipt images and produce CORD-style JSON.
 
-| Setting | Value |
-|---|---:|
-| Epochs | 15 |
-| Batch size | 4 |
-| Gradient accumulation | 1 |
-| Optimizer | AdamW |
-| Learning rate | 5e-5 |
-| Weight decay | 0.01 |
-| Gradient clipping | 0.5 |
-| Target length | 256 |
-| Projector dropout | 0.15 |
+| Setting |              Value |
+|---|-------------------:|
+| Epochs |                 15 |
+| Batch size |                  4 |
+| Gradient accumulation |                  1 |
+| Optimizer |              AdamW |
+| Learning rate |               5e-5 |
+| Weight decay |               0.01 |
+| Gradient clipping |                0.5 |
+| Target length |                256 |
+| Projector dropout |               None |
 | LR schedule | cosine with warmup |
-| Mixed precision | bf16/AMP on CUDA |
+| Mixed precision |   bf16/AMP on CUDA |
 
 Batch size 4 was kept because it learned the visual-language bridge faster than larger effective batches in this small-data setup. The tradeoff is earlier overfitting, so every epoch is checkpointed and final selection is made with validation loss, generation/evaluation method not used.
 
@@ -254,15 +252,15 @@ RL starts from the SFT checkpoint and updates only the projector.
 4. Skip the update if all sampled rewards are identical.
 5. Optimize a clipped policy objective with a KL penalty against a frozen SFT reference projector.
 
-| Setting | Value |
-|---|---:|
-| Completions per image | 4 |
-| Optimizer | AdamW |
-| RL learning rate | 5e-6 |
-| KL coefficient | 0.02 |
-| PPO epochs | 1 |
-| Clip epsilon | 0.2 |
-| Max steps | 500 |
+| Setting |      Value |
+|---|-----------:|
+| Completions per image |          4 |
+| Optimizer |      AdamW |
+| RL learning rate |       3e-6 |
+| KL coefficient |        0.1 |
+| PPO epochs |          1 |
+| Clip epsilon |        0.2 |
+| Max steps |        200 |
 | Checkpoint criterion | EMA reward |
 
 ---
@@ -399,7 +397,7 @@ vlm/
 ├── models/
 │   ├── language_model.py
 │   ├── projector.py
-│   ├── resampler.py
+│   ├── ca_resampler.py
 │   ├── receipt_vlm.py
 │   └── vision_encoder.py
 ├── training/
